@@ -11,6 +11,7 @@
 const axios = require('axios');
 const { initializeApp } = require('firebase/app');
 const { getFirestore, collection, addDoc, updateDoc, doc, serverTimestamp, setDoc } = require('firebase/firestore');
+const { Wallet } = require('ethers');
 
 // Load environment variables
 require('dotenv').config();
@@ -29,6 +30,16 @@ class LighterStandaloneService {
   constructor() {
     this.isRunning = false;
     this.db = null;
+    this.lighterClient = null;
+    
+    // Lighter configuration
+    this.lighterConfig = {
+      baseUrl: process.env.NEXT_PUBLIC_LIGHTER_BASE_URL || 'https://testnet.zklighter.elliot.ai',
+      apiKeyPrivateKey: process.env.LIGHTER_API_KEY_PRIVATE_KEY,
+      apiKeyPublicKey: process.env.LIGHTER_API_KEY_PUBLIC_KEY,
+      accountIndex: parseInt(process.env.LIGHTER_ACCOUNT_INDEX || '0'),
+      apiKeyIndex: parseInt(process.env.LIGHTER_API_KEY_INDEX || '3')
+    };
     
     // Initialize Firebase
     this.initializeFirebase();
@@ -60,6 +71,7 @@ class LighterStandaloneService {
     // Start data generation and health monitoring
     this.startMarketDataUpdates();
     this.startAgentContextUpdates();
+    this.startLighterDataUpdates(); // Add Lighter trading data
     this.startHealthCheck();
 
     console.log('✅ Service started in standalone mode');
@@ -142,6 +154,161 @@ class LighterStandaloneService {
     }, 120000);
 
     console.log('🤖 Started agent context updates (120s interval)');
+  }
+
+  startLighterDataUpdates() {
+    // Update Lighter trading data every 30 seconds
+    setInterval(async () => {
+      if (!this.isRunning) return;
+
+      try {
+        await this.fetchLighterData();
+      } catch (error) {
+        console.error('❌ Error fetching Lighter data:', error.message);
+      }
+    }, 30000);
+
+    console.log('⚡ Started Lighter data updates (30s interval)');
+  }
+
+  async fetchLighterData() {
+    if (!this.lighterConfig.apiKeyPrivateKey) {
+      console.log('⚠️ Lighter API key not configured, skipping trading data');
+      return;
+    }
+
+    try {
+      // Get account data
+      const accountData = await this.getLighterAccount();
+      if (accountData) {
+        await this.saveLighterAccountData(accountData);
+      }
+
+      // Get positions and orders
+      const tradingData = await this.getLighterTradingData();
+      if (tradingData) {
+        await this.saveLighterTradingData(tradingData);
+      }
+
+    } catch (error) {
+      console.error('❌ Lighter API error:', error.message);
+    }
+  }
+
+  async createLighterAuthToken() {
+    if (!this.lighterConfig.apiKeyPrivateKey) {
+      throw new Error('Lighter API key not configured');
+    }
+
+    const privateKey = this.lighterConfig.apiKeyPrivateKey.startsWith('0x') 
+      ? this.lighterConfig.apiKeyPrivateKey 
+      : `0x${this.lighterConfig.apiKeyPrivateKey}`;
+    
+    const wallet = new Wallet(privateKey);
+    const timestamp = Math.floor(Date.now() / 1000);
+    const expiry = timestamp + 3600;
+    
+    const message = `Lighter Authentication\nTimestamp: ${timestamp}\nExpiry: ${expiry}`;
+    const signature = await wallet.signMessage(message);
+    
+    return {
+      signature,
+      timestamp,
+      expiry,
+      address: wallet.address
+    };
+  }
+
+  async getLighterAccount() {
+    try {
+      const auth = await this.createLighterAuthToken();
+      
+      const response = await axios.get(
+        `${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${auth.signature}`,
+            'X-Timestamp': auth.timestamp,
+            'X-Expiry': auth.expiry,
+            'X-Address': auth.address
+          },
+          timeout: 10000
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error('Failed to get Lighter account:', error.message);
+      return null;
+    }
+  }
+
+  async getLighterTradingData() {
+    try {
+      const auth = await this.createLighterAuthToken();
+      
+      // Get positions and orders in parallel
+      const [positionsResponse, ordersResponse] = await Promise.all([
+        axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/positions`, {
+          headers: {
+            'Authorization': `Bearer ${auth.signature}`,
+            'X-Timestamp': auth.timestamp,
+            'X-Expiry': auth.expiry,
+            'X-Address': auth.address
+          },
+          timeout: 10000
+        }).catch(() => ({ data: [] })),
+        
+        axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/orders`, {
+          headers: {
+            'Authorization': `Bearer ${auth.signature}`,
+            'X-Timestamp': auth.timestamp,
+            'X-Expiry': auth.expiry,
+            'X-Address': auth.address
+          },
+          timeout: 10000
+        }).catch(() => ({ data: [] }))
+      ]);
+
+      return {
+        positions: positionsResponse.data || [],
+        orders: ordersResponse.data || []
+      };
+    } catch (error) {
+      console.error('Failed to get Lighter trading data:', error.message);
+      return null;
+    }
+  }
+
+  async saveLighterAccountData(accountData) {
+    try {
+      await setDoc(doc(this.db, 'lighterData', 'account'), {
+        ...accountData,
+        timestamp: serverTimestamp(),
+        lastUpdate: new Date().toISOString()
+      }, { merge: true });
+
+      console.log(`💰 Lighter account updated: Balance=${accountData.balance || 'N/A'}`);
+    } catch (error) {
+      console.error('❌ Error saving Lighter account:', error);
+    }
+  }
+
+  async saveLighterTradingData(tradingData) {
+    try {
+      await setDoc(doc(this.db, 'lighterData', 'trading'), {
+        positions: tradingData.positions,
+        orders: tradingData.orders,
+        positionCount: tradingData.positions?.length || 0,
+        orderCount: tradingData.orders?.length || 0,
+        timestamp: serverTimestamp(),
+        lastUpdate: new Date().toISOString()
+      }, { merge: true });
+
+      console.log(`📊 Lighter trading updated: ${tradingData.positions?.length || 0} positions, ${tradingData.orders?.length || 0} orders`);
+    } catch (error) {
+      console.error('❌ Error saving Lighter trading data:', error);
+    }
   }
 
   async saveMarketData(data) {
