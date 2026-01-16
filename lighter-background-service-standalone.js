@@ -9,22 +9,21 @@
  */
 
 const axios = require('axios');
-const { initializeApp } = require('firebase/app');
-const { getFirestore, collection, addDoc, updateDoc, doc, serverTimestamp, setDoc } = require('firebase/firestore');
+const admin = require('firebase-admin');
 const { Wallet } = require('ethers');
 
 // Load environment variables
 require('dotenv').config();
 
-// Firebase configuration from environment
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
-};
+// Firebase Admin configuration
+let serviceAccount;
+try {
+  // Try to parse service account from environment variable
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}');
+} catch (error) {
+  console.warn('⚠️ Could not parse FIREBASE_SERVICE_ACCOUNT_KEY, will try alternative auth methods');
+  serviceAccount = null;
+}
 
 class LighterStandaloneService {
   constructor() {
@@ -47,9 +46,25 @@ class LighterStandaloneService {
 
   initializeFirebase() {
     try {
-      const app = initializeApp(firebaseConfig);
-      this.db = getFirestore(app);
-      console.log('✅ Firebase initialized');
+      if (!admin.apps.length) {
+        if (serviceAccount && serviceAccount.project_id) {
+          // Use service account credentials
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            projectId: serviceAccount.project_id
+          });
+          console.log('✅ Firebase Admin initialized with service account');
+        } else {
+          // Fallback: use default credentials (for Railway deployment)
+          admin.initializeApp({
+            projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'hailmary-3ff6c'
+          });
+          console.log('✅ Firebase Admin initialized with default credentials');
+        }
+      }
+      
+      this.db = admin.firestore();
+      console.log('✅ Firestore connected');
     } catch (error) {
       console.error('❌ Firebase initialization failed:', error);
       process.exit(1);
@@ -99,7 +114,7 @@ class LighterStandaloneService {
             ethPrice: response.data.ethereum.usd,
             btcChange24h: response.data.bitcoin.usd_24h_change || 0,
             ethChange24h: response.data.ethereum.usd_24h_change || 0,
-            timestamp: serverTimestamp(),
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
             lastUpdate: new Date().toISOString()
           };
 
@@ -141,11 +156,11 @@ class LighterStandaloneService {
                           fearGreedValue > 45 ? 'neutral' :
                           fearGreedValue > 25 ? 'fear' : 'extreme_fear',
           trend: this.calculateTrend(),
-          timestamp: serverTimestamp(),
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
           lastUpdate: new Date().toISOString()
         };
 
-        await setDoc(doc(this.db, 'agentContext', 'market'), agentContext, { merge: true });
+        await this.db.collection('agentContext').doc('market').set(agentContext, { merge: true });
         console.log(`🤖 Agent context updated: F&G=${fearGreedValue}, Funding=${(fundingRate*100).toFixed(3)}%`);
 
       } catch (error) {
@@ -282,9 +297,9 @@ class LighterStandaloneService {
 
   async saveLighterAccountData(accountData) {
     try {
-      await setDoc(doc(this.db, 'lighterData', 'account'), {
+      await this.db.collection('lighterData').doc('account').set({
         ...accountData,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString()
       }, { merge: true });
 
@@ -296,12 +311,12 @@ class LighterStandaloneService {
 
   async saveLighterTradingData(tradingData) {
     try {
-      await setDoc(doc(this.db, 'lighterData', 'trading'), {
+      await this.db.collection('lighterData').doc('trading').set({
         positions: tradingData.positions,
         orders: tradingData.orders,
         positionCount: tradingData.positions?.length || 0,
         orderCount: tradingData.orders?.length || 0,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString()
       }, { merge: true });
 
@@ -313,7 +328,7 @@ class LighterStandaloneService {
 
   async saveMarketData(data) {
     try {
-      await setDoc(doc(this.db, 'marketData', 'latest'), data, { merge: true });
+      await this.db.collection('marketData').doc('latest').set(data, { merge: true });
     } catch (error) {
       console.error('❌ Error saving market data:', error);
     }
@@ -341,9 +356,9 @@ class LighterStandaloneService {
 
   async updateServiceStatus(status, extra = {}) {
     try {
-      await setDoc(doc(this.db, 'serviceStatus', 'lighterService'), {
+      await this.db.collection('serviceStatus').doc('lighterService').set({
         status,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString(),
         pid: process.pid,
         mode: 'standalone',
