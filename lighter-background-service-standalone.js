@@ -11,6 +11,8 @@
 const axios = require('axios');
 const admin = require('firebase-admin');
 const { Wallet } = require('ethers');
+const fs = require('fs');
+const path = require('path');
 
 // Load environment variables
 require('dotenv').config();
@@ -18,10 +20,17 @@ require('dotenv').config();
 // Firebase Admin configuration
 let serviceAccount;
 try {
-  // Try to parse service account from environment variable
-  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}');
+  // Try to load service account from file first (Railway deployment)
+  const serviceAccountPath = path.join(__dirname, '..', 'serviceAccountKey.json');
+  if (fs.existsSync(serviceAccountPath)) {
+    console.log('🔑 Loading service account from serviceAccountKey.json');
+    serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+  } else {
+    // Fallback to environment variable
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}');
+  }
 } catch (error) {
-  console.warn('⚠️ Could not parse FIREBASE_SERVICE_ACCOUNT_KEY, will try alternative auth methods');
+  console.warn('⚠️ Could not load service account from file or environment, will try alternative auth methods');
   serviceAccount = null;
 }
 
@@ -31,6 +40,14 @@ class LighterStandaloneService {
     this.db = null;
     this.lighterClient = null;
     this.cachedAuthToken = null; // Cache auth tokens since they last up to 8 hours
+    
+    // Debug Railway environment
+    console.log('🔍 Railway Environment Debug:');
+    console.log('  NODE_ENV:', process.env.NODE_ENV);
+    console.log('  Has FIREBASE_SERVICE_ACCOUNT_KEY:', !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+    console.log('  Has GOOGLE_APPLICATION_CREDENTIALS:', !!process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    console.log('  Firebase Project ID:', process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID);
+    console.log('  Available env vars:', Object.keys(process.env).filter(k => k.includes('FIREBASE')).join(', '));
     
     // Lighter configuration - following SignerClient pattern
     this.lighterConfig = {
@@ -120,24 +137,25 @@ class LighterStandaloneService {
       if (!admin.apps.length) {
         console.log('🔥 Initializing Firebase Admin...');
         
-        // Try service account credentials first
+        // Try service account credentials first (from file or environment)
         if (serviceAccount && serviceAccount.project_id) {
-          console.log('🔥 Using local service account credentials');
+          console.log('🔥 Using service account credentials');
+          console.log('📄 Service account project:', serviceAccount.project_id);
+          console.log('📧 Service account email:', serviceAccount.client_email);
+          
           admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
             projectId: serviceAccount.project_id
           });
-          console.log('✅ Firebase Admin initialized with service account');
+          console.log('✅ Firebase Admin initialized with service account credentials');
         } 
-        // Try environment variable service account (Railway)
-        else if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-          console.log('🔥 Using environment service account credentials');
-          const serviceAccountFromEnv = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+        // Try Google Application Default Credentials (Railway alternative)
+        else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+          console.log('🔥 Using Google Application Default Credentials');
           admin.initializeApp({
-            credential: admin.credential.cert(serviceAccountFromEnv),
-            projectId: serviceAccountFromEnv.project_id
+            projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'hailmary-3ff6c'
           });
-          console.log('✅ Firebase Admin initialized with environment service account');
+          console.log('✅ Firebase Admin initialized with Google Application Credentials');
         }
         // Fallback: use project ID only (limited functionality)
         else {
@@ -165,7 +183,8 @@ class LighterStandaloneService {
       });
       
       // Don't exit - continue without Firebase (service will skip saves)
-      console.log('⚠️ Continuing without Firebase - data will not be saved');
+      console.log('⚠️ Continuing without Firebase - Lighter data will be logged only');
+      console.log('⚠️ To fix: Upload serviceAccountKey.json to Railway or check environment variables');
       this.db = null;
     }
   }
