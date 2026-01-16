@@ -118,27 +118,55 @@ class LighterStandaloneService {
   initializeFirebase() {
     try {
       if (!admin.apps.length) {
+        console.log('🔥 Initializing Firebase Admin...');
+        
+        // Try service account credentials first
         if (serviceAccount && serviceAccount.project_id) {
-          // Use service account credentials
+          console.log('🔥 Using local service account credentials');
           admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
             projectId: serviceAccount.project_id
           });
           console.log('✅ Firebase Admin initialized with service account');
-        } else {
-          // Fallback: use default credentials (for Railway deployment)
+        } 
+        // Try environment variable service account (Railway)
+        else if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+          console.log('🔥 Using environment service account credentials');
+          const serviceAccountFromEnv = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+          admin.initializeApp({
+            credential: admin.credential.cert(serviceAccountFromEnv),
+            projectId: serviceAccountFromEnv.project_id
+          });
+          console.log('✅ Firebase Admin initialized with environment service account');
+        }
+        // Fallback: use project ID only (limited functionality)
+        else {
+          console.log('⚠️ Using minimal Firebase initialization (project ID only)');
           admin.initializeApp({
             projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'hailmary-3ff6c'
           });
-          console.log('✅ Firebase Admin initialized with default credentials');
+          console.log('✅ Firebase Admin initialized with minimal config');
         }
       }
       
       this.db = admin.firestore();
-      console.log('✅ Firestore connected');
+      
+      // Test Firestore connection
+      console.log('🧪 Testing Firestore connection...');
+      this.db.settings({ ignoreUndefinedProperties: true });
+      
+      console.log('✅ Firestore connected and configured');
     } catch (error) {
       console.error('❌ Firebase initialization failed:', error);
-      process.exit(1);
+      console.error('❌ Error details:', {
+        message: error.message,
+        code: error.code,
+        stack: error.stack
+      });
+      
+      // Don't exit - continue without Firebase (service will skip saves)
+      console.log('⚠️ Continuing without Firebase - data will not be saved');
+      this.db = null;
     }
   }
 
@@ -549,7 +577,18 @@ class LighterStandaloneService {
       });
 
       console.log(`✅ Lighter account response status: ${response.status}`);
-      console.log(`💰 Account data:`, response.data);
+      console.log(`💰 Account data keys:`, Object.keys(response.data || {}));
+      console.log(`💰 Account data:`, JSON.stringify(response.data, null, 2));
+      
+      // Check if response.data has balance-related fields
+      if (response.data) {
+        console.log(`🔍 Looking for balance fields:`);
+        console.log(`  - balance: ${response.data.balance}`);
+        console.log(`  - equity: ${response.data.equity}`);
+        console.log(`  - totalBalance: ${response.data.totalBalance}`);
+        console.log(`  - accountValue: ${response.data.accountValue}`);
+      }
+      
       return response.data;
     } catch (error) {
       console.error('❌ Failed to get Lighter account:', error.message);
@@ -600,6 +639,11 @@ class LighterStandaloneService {
   }
 
   async saveLighterAccountData(accountData) {
+    if (!this.db) {
+      console.log('⚠️ Skipping Lighter account save - Firebase not available');
+      return;
+    }
+    
     try {
       await this.db.collection('lighterData').doc('account').set({
         ...accountData,
@@ -608,12 +652,19 @@ class LighterStandaloneService {
       }, { merge: true });
 
       console.log(`💰 Lighter account updated: Balance=${accountData.balance || 'N/A'}`);
+      console.log(`🔍 Account data keys:`, Object.keys(accountData));
+      console.log(`🔍 Full account data:`, JSON.stringify(accountData, null, 2));
     } catch (error) {
       console.error('❌ Error saving Lighter account:', error);
     }
   }
 
   async saveLighterTradingData(tradingData) {
+    if (!this.db) {
+      console.log('⚠️ Skipping Lighter trading save - Firebase not available');
+      return;
+    }
+    
     try {
       await this.db.collection('lighterData').doc('trading').set({
         positions: tradingData.positions,
@@ -631,6 +682,11 @@ class LighterStandaloneService {
   }
 
   async saveMarketData(data) {
+    if (!this.db) {
+      console.log('⚠️ Skipping market data save - Firebase not available');
+      return;
+    }
+    
     try {
       await this.db.collection('marketData').doc('latest').set(data, { merge: true });
     } catch (error) {
@@ -659,6 +715,11 @@ class LighterStandaloneService {
   }
 
   async updateServiceStatus(status, extra = {}) {
+    if (!this.db) {
+      console.log(`⚠️ Service status: ${status} (Firebase not available)`);
+      return;
+    }
+    
     try {
       await this.db.collection('serviceStatus').doc('lighterService').set({
         status,
