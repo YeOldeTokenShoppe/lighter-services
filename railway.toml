@@ -8,9 +8,10 @@ restartPolicyType = "always"
 
 [env]
 NODE_ENV = "production"
-LIGHTER_API_KEY = "673966de72a50613f1c02a8a993e6307df7c86e94200a00c7ff42936a19def5b720def4525d9addb"
-LIGHTER_WALLET_PRIVATE_KEY = "af1d606804024e89e37eaf8de53d211bb4a55a9dd6634222601db0162b98be86"
+# All sensitive environment variables should be set directly in Railway dashboard:
+# - LIGHTER_API_KEY
+# - LIGHTER_WALLET_PRIVATE_KEY  
+# - FIREBASE_SERVICE_ACCOUNT_KEY
 LIGHTER_ACCOUNT_INDEX = "0"
 LIGHTER_API_KEY_INDEX = "2"
 NEXT_PUBLIC_LIGHTER_BASE_URL = "https://testnet.zklighter.elliot.ai"
-# FIREBASE_SERVICE_ACCOUNT_KEY should be set directly in Railway environment variables for security
