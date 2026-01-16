@@ -17,6 +17,13 @@ const path = require('path');
 // Load environment variables
 require('dotenv').config();
 
+// Immediate environment check (should appear in Railway logs)
+console.log('🚀 Lighter Service Starting - Environment Check:');
+console.log('  NODE_ENV:', process.env.NODE_ENV);
+console.log('  Has FIREBASE_SERVICE_ACCOUNT_KEY:', !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+console.log('  FIREBASE_SERVICE_ACCOUNT_KEY length:', process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.length);
+console.log('  Service version: 2026-01-16-DEBUG');
+
 // Firebase Admin configuration
 let serviceAccount;
 try {
@@ -247,6 +254,25 @@ class LighterStandaloneService {
       // Test Firestore connection
       console.log('🧪 Testing Firestore connection...');
       this.db.settings({ ignoreUndefinedProperties: true });
+      
+      // Test write permissions with a simple document
+      console.log('🧪 Testing Firestore write permissions...');
+      try {
+        const testRef = this.db.collection('test').doc('connection-test');
+        await testRef.set({ 
+          timestamp: new Date(), 
+          test: true, 
+          service: 'lighter-background-service' 
+        });
+        console.log('✅ Firestore write test successful');
+        // Clean up test document
+        await testRef.delete();
+        console.log('🧹 Test document cleaned up');
+      } catch (testError) {
+        console.error('❌ Firestore write test failed:', testError.message);
+        console.error('❌ Error code:', testError.code);
+        console.error('❌ Error details:', testError.details);
+      }
       
       console.log('✅ Firestore connected and configured');
     } catch (error) {
