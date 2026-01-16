@@ -142,8 +142,10 @@ class LighterStandaloneService {
       privateKeyLength: this.lighterConfig.apiKeyPrivateKey?.length
     });
     
-    // Initialize Firebase
-    this.initializeFirebase();
+    // Initialize Firebase (async)
+    this.initializeFirebase().catch(error => {
+      console.error('❌ Firebase initialization failed during construction:', error.message);
+    });
   }
 
   validateConfiguration() {
@@ -201,7 +203,7 @@ class LighterStandaloneService {
     }
   }
 
-  initializeFirebase() {
+  async initializeFirebase() {
     try {
       if (!admin.apps.length) {
         console.log('🔥 Initializing Firebase Admin...');
