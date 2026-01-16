@@ -193,20 +193,33 @@ class LighterStandaloneService {
     }
 
     try {
+      console.log('🔄 Starting Lighter data fetch cycle...');
+      
       // Get account data
+      console.log('🏦 Fetching Lighter account data...');
       const accountData = await this.getLighterAccount();
       if (accountData) {
+        console.log('💾 Saving account data to Firebase...');
         await this.saveLighterAccountData(accountData);
+      } else {
+        console.log('⚠️ No account data returned from Lighter API');
       }
 
       // Get positions and orders
+      console.log('📊 Fetching Lighter trading data...');
       const tradingData = await this.getLighterTradingData();
       if (tradingData) {
+        console.log('💾 Saving trading data to Firebase...');
         await this.saveLighterTradingData(tradingData);
+      } else {
+        console.log('⚠️ No trading data returned from Lighter API');
       }
+
+      console.log('✅ Lighter data fetch cycle complete');
 
     } catch (error) {
       console.error('❌ Lighter API error:', error.message);
+      console.error('❌ Error stack:', error.stack);
     }
   }
 
@@ -215,9 +228,28 @@ class LighterStandaloneService {
       throw new Error('Lighter API key not configured');
     }
 
-    const privateKey = this.lighterConfig.apiKeyPrivateKey.startsWith('0x') 
-      ? this.lighterConfig.apiKeyPrivateKey 
-      : `0x${this.lighterConfig.apiKeyPrivateKey}`;
+    console.log('🔐 Raw private key length:', this.lighterConfig.apiKeyPrivateKey?.length);
+    console.log('🔐 Private key starts with 0x:', this.lighterConfig.apiKeyPrivateKey?.startsWith('0x'));
+    
+    let privateKey = this.lighterConfig.apiKeyPrivateKey.trim();
+    
+    // Remove 0x prefix if present, then add it back
+    if (privateKey.startsWith('0x')) {
+      privateKey = privateKey.slice(2);
+    }
+    
+    // Validate length (should be 64 hex characters)
+    if (privateKey.length !== 64) {
+      throw new Error(`Invalid private key length: ${privateKey.length} (expected 64 hex characters)`);
+    }
+    
+    // Validate hex format
+    if (!/^[0-9a-fA-F]+$/.test(privateKey)) {
+      throw new Error('Private key contains invalid characters (must be hex)');
+    }
+    
+    privateKey = `0x${privateKey}`;
+    console.log('🔐 Processed private key length:', privateKey.length);
     
     const wallet = new Wallet(privateKey);
     const timestamp = Math.floor(Date.now() / 1000);
@@ -236,24 +268,32 @@ class LighterStandaloneService {
 
   async getLighterAccount() {
     try {
+      console.log(`🔐 Creating Lighter auth token...`);
       const auth = await this.createLighterAuthToken();
       
-      const response = await axios.get(
-        `${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${auth.signature}`,
-            'X-Timestamp': auth.timestamp,
-            'X-Expiry': auth.expiry,
-            'X-Address': auth.address
-          },
-          timeout: 10000
-        }
-      );
+      const url = `${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}`;
+      console.log(`🌐 Fetching Lighter account from: ${url}`);
+      console.log(`🔑 Using address: ${auth.address}`);
+      
+      const response = await axios.get(url, {
+        headers: {
+          'Authorization': `Bearer ${auth.signature}`,
+          'X-Timestamp': auth.timestamp,
+          'X-Expiry': auth.expiry,
+          'X-Address': auth.address
+        },
+        timeout: 10000
+      });
 
+      console.log(`✅ Lighter account response status: ${response.status}`);
+      console.log(`💰 Account data:`, response.data);
       return response.data;
     } catch (error) {
-      console.error('Failed to get Lighter account:', error.message);
+      console.error('❌ Failed to get Lighter account:', error.message);
+      if (error.response) {
+        console.error('❌ Response status:', error.response.status);
+        console.error('❌ Response data:', error.response.data);
+      }
       return null;
     }
   }
