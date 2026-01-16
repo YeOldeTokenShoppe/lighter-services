@@ -1,0 +1,27 @@
+{
+  "name": "lighter-background-service",
+  "version": "1.0.0",
+  "description": "Background service to maintain connection with Lighter trading API",
+  "main": "lighter-background-service.js",
+  "scripts": {
+    "start": "node lighter-background-service.js",
+    "dev": "nodemon lighter-background-service.js",
+    "install": "npm install",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop lighter-service",
+    "pm2:restart": "pm2 restart lighter-service",
+    "pm2:logs": "pm2 logs lighter-service"
+  },
+  "dependencies": {
+    "ws": "^8.14.2",
+    "axios": "^1.6.2",
+    "firebase": "^10.7.1",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "keywords": ["lighter", "trading", "background-service", "firebase", "websocket"],
+  "author": "Your Name",
+  "license": "MIT"
+}
