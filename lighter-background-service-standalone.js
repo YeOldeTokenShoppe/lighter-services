@@ -20,16 +20,42 @@ require('dotenv').config();
 // Firebase Admin configuration
 let serviceAccount;
 try {
-  // Try to load service account from file first (Railway deployment)
-  const serviceAccountPath = path.join(__dirname, '..', 'serviceAccountKey.json');
-  if (fs.existsSync(serviceAccountPath)) {
-    console.log('🔑 Loading service account from serviceAccountKey.json');
-    serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
-  } else {
+  // Try multiple possible service account file locations
+  const possiblePaths = [
+    path.join(__dirname, '..', 'serviceAccountKey.json'),           // ../serviceAccountKey.json
+    path.join(__dirname, 'serviceAccountKey.json'),                // ./serviceAccountKey.json  
+    path.join(process.cwd(), 'serviceAccountKey.json'),            // root/serviceAccountKey.json
+    '/app/serviceAccountKey.json'                                   // Railway absolute path
+  ];
+  
+  console.log('🔍 Checking for service account file in these locations:');
+  let foundServiceAccount = false;
+  
+  for (const filePath of possiblePaths) {
+    console.log(`  📁 Checking: ${filePath} - exists: ${fs.existsSync(filePath)}`);
+    if (fs.existsSync(filePath)) {
+      console.log(`🔑 Loading service account from: ${filePath}`);
+      serviceAccount = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      console.log(`✅ Service account loaded - project: ${serviceAccount.project_id}, email: ${serviceAccount.client_email}`);
+      foundServiceAccount = true;
+      break;
+    }
+  }
+  
+  if (!foundServiceAccount) {
+    console.log('📂 No service account file found, trying environment variable');
     // Fallback to environment variable
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY || '{}');
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+      console.log('🔑 Loading service account from environment variable');
+      serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+      console.log(`✅ Service account loaded from env - project: ${serviceAccount.project_id}`);
+    } else {
+      console.log('❌ No service account found in environment either');
+      serviceAccount = null;
+    }
   }
 } catch (error) {
+  console.error('❌ Error loading service account:', error.message);
   console.warn('⚠️ Could not load service account from file or environment, will try alternative auth methods');
   serviceAccount = null;
 }
@@ -145,7 +171,9 @@ class LighterStandaloneService {
           
           admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
-            projectId: serviceAccount.project_id
+            projectId: serviceAccount.project_id,
+            // Explicitly set database URL if available
+            databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL
           });
           console.log('✅ Firebase Admin initialized with service account credentials');
         } 
