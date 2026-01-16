@@ -91,9 +91,25 @@ class LighterStandaloneService {
     console.log('🔍 Railway Environment Debug:');
     console.log('  NODE_ENV:', process.env.NODE_ENV);
     console.log('  Has FIREBASE_SERVICE_ACCOUNT_KEY:', !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+    console.log('  FIREBASE_SERVICE_ACCOUNT_KEY length:', process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.length || 'undefined');
     console.log('  Has GOOGLE_APPLICATION_CREDENTIALS:', !!process.env.GOOGLE_APPLICATION_CREDENTIALS);
     console.log('  Firebase Project ID:', process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID);
+    console.log('  Has LIGHTER_API_KEY:', !!process.env.LIGHTER_API_KEY);
+    console.log('  Has LIGHTER_WALLET_PRIVATE_KEY:', !!process.env.LIGHTER_WALLET_PRIVATE_KEY);
     console.log('  Available env vars:', Object.keys(process.env).filter(k => k.includes('FIREBASE')).join(', '));
+    
+    // Test if we can parse the service account
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+      try {
+        const testParse = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+        console.log('✅ FIREBASE_SERVICE_ACCOUNT_KEY parses correctly');
+        console.log('  Project:', testParse.project_id);
+        console.log('  Email:', testParse.client_email);
+        console.log('  Has private_key:', !!testParse.private_key);
+      } catch (e) {
+        console.error('❌ FIREBASE_SERVICE_ACCOUNT_KEY parse error:', e.message);
+      }
+    }
     
     // Lighter configuration - following SignerClient pattern
     this.lighterConfig = {
