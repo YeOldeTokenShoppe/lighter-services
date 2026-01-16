@@ -50,10 +50,11 @@ try {
   }
   
   if (!foundServiceAccount) {
-    console.log('📂 No service account file found, trying environment variable');
-    // Fallback to environment variable
+    console.log('📂 No service account file found, trying environment variables');
+    
+    // Try FIREBASE_SERVICE_ACCOUNT_KEY first
     if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-      console.log('🔑 Loading service account from environment variable');
+      console.log('🔑 Loading service account from FIREBASE_SERVICE_ACCOUNT_KEY');
       console.log('🔍 Environment key length:', process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.length);
       console.log('🔍 Environment key preview:', process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.substring(0, 50) + '...');
       
@@ -66,18 +67,38 @@ try {
           console.log('🔧 Fixed private key newlines');
         }
         
-        console.log(`✅ Service account loaded from env - project: ${serviceAccount.project_id}`);
+        console.log(`✅ Service account loaded from FIREBASE_SERVICE_ACCOUNT_KEY - project: ${serviceAccount.project_id}`);
         console.log(`📧 Service account email: ${serviceAccount.client_email}`);
         console.log(`🔑 Private key preview: ${serviceAccount.private_key?.substring(0, 50)}...`);
         console.log('🔑 Private key ends with:', serviceAccount.private_key?.substring(-50));
       } catch (parseError) {
         console.error('❌ Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY JSON:', parseError.message);
-        console.log('🔍 Raw env value:', JSON.stringify(process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.substring(0, 100)));
+        console.log('🔍 Raw env value preview:', JSON.stringify(process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.substring(0, 100)));
+        serviceAccount = null;
+      }
+    }
+    // Try GOOGLE_APPLICATION_CREDENTIALS as JSON string (Gemini's suggestion)
+    else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      console.log('🔑 Trying GOOGLE_APPLICATION_CREDENTIALS as JSON string');
+      try {
+        serviceAccount = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+        
+        // Fix private key formatting
+        if (serviceAccount.private_key) {
+          serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+          console.log('🔧 Fixed private key newlines');
+        }
+        
+        console.log(`✅ Service account loaded from GOOGLE_APPLICATION_CREDENTIALS - project: ${serviceAccount.project_id}`);
+        console.log(`📧 Service account email: ${serviceAccount.client_email}`);
+      } catch (parseError) {
+        console.log('ℹ️ GOOGLE_APPLICATION_CREDENTIALS is not a JSON string (probably a file path)');
         serviceAccount = null;
       }
     } else {
-      console.log('❌ No FIREBASE_SERVICE_ACCOUNT_KEY environment variable found');
+      console.log('❌ No service account environment variables found');
       console.log('🔍 Available Firebase env vars:', Object.keys(process.env).filter(k => k.includes('FIREBASE')));
+      console.log('🔍 Available Google env vars:', Object.keys(process.env).filter(k => k.includes('GOOGLE')));
       serviceAccount = null;
     }
   }
@@ -115,6 +136,19 @@ class LighterStandaloneService {
         console.log('  Has private_key:', !!testParse.private_key);
       } catch (e) {
         console.error('❌ FIREBASE_SERVICE_ACCOUNT_KEY parse error:', e.message);
+        console.log('🔍 First 100 chars:', process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.substring(0, 100));
+      }
+    }
+    
+    // Also try GOOGLE_APPLICATION_CREDENTIALS as JSON string (Gemini's suggestion)
+    if (process.env.GOOGLE_APPLICATION_CREDENTIALS && !process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+      console.log('🔍 Found GOOGLE_APPLICATION_CREDENTIALS, trying as JSON string');
+      try {
+        const testParse = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+        console.log('✅ GOOGLE_APPLICATION_CREDENTIALS parses correctly');
+        console.log('  Project:', testParse.project_id);
+      } catch (e) {
+        console.log('ℹ️ GOOGLE_APPLICATION_CREDENTIALS appears to be a file path, not JSON string');
       }
     }
     
