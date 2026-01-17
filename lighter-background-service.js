@@ -10,21 +10,11 @@
 
 const WebSocket = require('ws');
 const axios = require('axios');
-const { initializeApp } = require('firebase/app');
-const { getFirestore, collection, addDoc, updateDoc, doc, serverTimestamp, setDoc } = require('firebase/firestore');
+const admin = require('firebase-admin');
+const { createServiceAccountFromEnv } = require('../firebase-env-fix');
 
 // Load environment variables
 require('dotenv').config({ path: '../.env.local' });
-
-// Firebase configuration
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
-};
 
 class LighterBackgroundService {
   constructor() {
@@ -49,35 +39,49 @@ class LighterBackgroundService {
 
   initializeFirebase() {
     try {
-      // Check if all required environment variables are present
-      const requiredEnvVars = [
-        'NEXT_PUBLIC_FIREBASE_API_KEY',
-        'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN', 
-        'NEXT_PUBLIC_FIREBASE_PROJECT_ID'
-      ];
-
-      const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+      console.log('🔧 Initializing Firebase Admin SDK...');
       
-      if (missingVars.length > 0) {
-        console.error('❌ Missing Firebase environment variables:', missingVars);
-        console.log('🔧 Required Firebase env vars:', requiredEnvVars);
-        this.db = null;
+      // Check if Firebase is already initialized
+      if (admin.apps.length > 0) {
+        console.log('✅ Firebase already initialized, using existing instance');
+        this.db = admin.firestore();
         return;
       }
 
-      console.log('🔧 Initializing Firebase with config:', {
-        projectId: firebaseConfig.projectId,
-        authDomain: firebaseConfig.authDomain,
-        hasApiKey: !!firebaseConfig.apiKey
+      // Try to create service account from individual environment variables
+      let serviceAccount;
+      try {
+        serviceAccount = createServiceAccountFromEnv();
+        console.log('✅ Service account created from individual env vars');
+      } catch (envError) {
+        console.log('⚠️ Individual env vars failed, trying JSON fallback:', envError.message);
+        
+        // Fallback to JSON if individual vars fail
+        if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+          try {
+            serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+            console.log('✅ Service account parsed from JSON');
+          } catch (jsonError) {
+            throw new Error(`Both individual env vars and JSON parsing failed. JSON error: ${jsonError.message}`);
+          }
+        } else {
+          throw new Error('No Firebase service account configuration found');
+        }
+      }
+
+      // Initialize Firebase Admin
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        projectId: serviceAccount.project_id
       });
 
-      const app = initializeApp(firebaseConfig);
-      this.db = getFirestore(app);
+      this.db = admin.firestore();
+      console.log('✅ Firebase Admin SDK initialized successfully');
+      console.log('Project ID:', serviceAccount.project_id);
       
-      console.log('✅ Firebase initialized successfully');
     } catch (error) {
       console.error('❌ Firebase initialization failed:', error);
-      console.error('Config state:', firebaseConfig);
+      console.error('Error details:', error.message);
       this.db = null;
       
       // Don't exit process - continue without Firebase
@@ -205,9 +209,9 @@ class LighterBackgroundService {
     }
 
     try {
-      await setDoc(doc(this.db, 'lighterData', 'balance'), {
+      await this.db.collection('lighterData').doc('balance').set({
         ...data,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString()
       }, { merge: true });
 
@@ -225,9 +229,9 @@ class LighterBackgroundService {
     }
 
     try {
-      await addDoc(collection(this.db, 'lighterData', 'positions', 'history'), {
+      await this.db.collection('lighterData').doc('positions').collection('history').add({
         ...data,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         createdAt: new Date().toISOString()
       });
 
@@ -245,9 +249,9 @@ class LighterBackgroundService {
     }
 
     try {
-      await addDoc(collection(this.db, 'lighterData', 'trades', 'executions'), {
+      await this.db.collection('lighterData').doc('trades').collection('executions').add({
         ...data,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         executedAt: new Date().toISOString()
       });
 
@@ -264,9 +268,9 @@ class LighterBackgroundService {
     }
 
     try {
-      await setDoc(doc(this.db, 'marketData', 'latest'), {
+      await this.db.collection('marketData').doc('latest').set({
         ...data,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString()
       }, { merge: true });
 
@@ -291,14 +295,14 @@ class LighterBackgroundService {
       }
 
       // Update market context that agents will use
-      await setDoc(doc(this.db, 'agentContext', 'market'), {
+      await this.db.collection('agentContext').doc('market').set({
         btcPrice: marketData.btcPrice,
         ethPrice: marketData.ethPrice,
         fearGreed: marketData.fearGreed || 45,
         fundingRate: marketData.fundingRate || 0.01,
         volume: marketData.volume,
         trend: this.calculateTrend(marketData),
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString()
       }, { merge: true });
 
@@ -364,9 +368,14 @@ class LighterBackgroundService {
 
   async updateServiceStatus(status, extra = {}) {
     try {
-      await setDoc(doc(this.db, 'serviceStatus', 'lighterService'), {
+      if (!this.isFirebaseReady()) {
+        console.warn('⚠️ Firebase not ready, skipping service status update');
+        return;
+      }
+
+      await this.db.collection('serviceStatus').doc('lighterService').set({
         status,
-        timestamp: serverTimestamp(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
         lastUpdate: new Date().toISOString(),
         pid: process.pid,
         ...extra
