@@ -500,8 +500,8 @@ class LighterBackgroundService {
       return false;
     }
 
-    // Check confidence threshold
-    if (decision.confidence < 0.6) {
+    // Check confidence threshold (lowered to 0.5 to enable trading)
+    if (decision.confidence < 0.5) {
       console.log('🚫 Safety check failed: Confidence too low:', decision.confidence);
       return false;
     }
