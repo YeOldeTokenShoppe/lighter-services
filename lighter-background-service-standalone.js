@@ -14,6 +14,27 @@ const { Wallet } = require('ethers');
 const fs = require('fs');
 const path = require('path');
 
+// Rate limiting helper
+class RateLimiter {
+  constructor() {
+    this.lastCall = 0;
+    this.minInterval = 2000; // 2 seconds between API calls
+  }
+  
+  async throttle() {
+    const now = Date.now();
+    const timeSinceLastCall = now - this.lastCall;
+    
+    if (timeSinceLastCall < this.minInterval) {
+      const waitTime = this.minInterval - timeSinceLastCall;
+      console.log(`⏱️ Rate limiting: waiting ${waitTime}ms`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    this.lastCall = Date.now();
+  }
+}
+
 // Load environment variables
 require('dotenv').config();
 
@@ -190,6 +211,7 @@ class LighterStandaloneService {
     this.db = null;
     this.lighterClient = null;
     this.cachedAuthToken = null; // Cache auth tokens since they last up to 8 hours
+    this.rateLimiter = new RateLimiter();
     
     // Debug Railway environment
     console.log('🔍 Railway Environment Debug:');
@@ -525,7 +547,7 @@ class LighterStandaloneService {
   }
 
   startLighterDataUpdates() {
-    // Update Lighter trading data every 30 seconds
+    // Update Lighter trading data every 5 minutes (rate limit friendly)
     setInterval(async () => {
       if (!this.isRunning) return;
 
@@ -534,9 +556,9 @@ class LighterStandaloneService {
       } catch (error) {
         console.error('❌ Error fetching Lighter data:', error.message);
       }
-    }, 600000);
+    }, 1200000); // 20 minutes (20 * 60 * 1000ms)
 
-    console.log('⚡ Started Lighter data updates (600s/10min interval)');
+    console.log('⚡ Started Lighter data updates (20min interval, well under 15min API limit)');
   }
 
   async fetchLighterData() {
@@ -825,6 +847,9 @@ class LighterStandaloneService {
       
       console.log('📋 Request headers:', Object.keys(headers).join(', '));
       
+      // Rate limit before API call
+      await this.rateLimiter.throttle();
+      
       const response = await axios.get(url, {
         headers,
         timeout: 10000
@@ -859,9 +884,9 @@ class LighterStandaloneService {
     try {
       const auth = await this.createLighterAuthToken();
       
-      // Get positions and orders in parallel
-      const [positionsResponse, ordersResponse] = await Promise.all([
-        axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/positions`, {
+      // Get positions with rate limiting
+      await this.rateLimiter.throttle();
+      const positionsResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/positions`, {
           headers: {
             'Authorization': `Bearer ${auth.signature}`,
             'X-Timestamp': auth.timestamp,
@@ -869,18 +894,19 @@ class LighterStandaloneService {
             'X-Address': auth.address
           },
           timeout: 10000
-        }).catch(() => ({ data: [] })),
+        }).catch(() => ({ data: [] }));
         
-        axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/orders`, {
-          headers: {
-            'Authorization': `Bearer ${auth.signature}`,
-            'X-Timestamp': auth.timestamp,
-            'X-Expiry': auth.expiry,
-            'X-Address': auth.address
-          },
-          timeout: 10000
-        }).catch(() => ({ data: [] }))
-      ]);
+      // Get orders with rate limiting
+      await this.rateLimiter.throttle();
+      const ordersResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/orders`, {
+        headers: {
+          'Authorization': `Bearer ${auth.signature}`,
+          'X-Timestamp': auth.timestamp,
+          'X-Expiry': auth.expiry,
+          'X-Address': auth.address
+        },
+        timeout: 10000
+      }).catch(() => ({ data: [] }));
 
       return {
         positions: positionsResponse.data || [],
