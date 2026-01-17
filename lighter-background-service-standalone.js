@@ -436,9 +436,9 @@ class LighterStandaloneService {
       } catch (error) {
         console.error('❌ Error fetching Lighter data:', error.message);
       }
-    }, 30000);
+    }, 600000);
 
-    console.log('⚡ Started Lighter data updates (30s interval)');
+    console.log('⚡ Started Lighter data updates (600s/10min interval)');
   }
 
   async fetchLighterData() {
@@ -706,7 +706,7 @@ class LighterStandaloneService {
       
       if (auth.keyFormat === 'dual-key') {
         // Dual-key authentication: API key + signed auth token
-        headers['X-API-Key'] = auth.apiKey;
+        headers['X-API-Key'] = auth.apiKey.trim().replace(/[\r\n\t]/g, '');
         headers['X-Signature'] = auth.signature;
         headers['X-Address'] = auth.address;
         console.log(`🔑 Using dual-key authentication - API key + signed token (wallet: ${auth.address})`);
@@ -717,7 +717,7 @@ class LighterStandaloneService {
         console.log(`🔑 Using legacy signed auth token with wallet: ${auth.address} (${auth.keyFormat} format)`);
       } else if (auth.apiKey) {
         // Legacy direct API key authentication
-        headers['X-API-Key'] = auth.apiKey;
+        headers['X-API-Key'] = auth.apiKey.trim().replace(/[\r\n\t]/g, '');
         console.log(`🔑 Using legacy direct API key authentication (${auth.keyFormat} format)`);
       }
       

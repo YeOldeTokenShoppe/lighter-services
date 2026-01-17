@@ -49,12 +49,39 @@ class LighterBackgroundService {
 
   initializeFirebase() {
     try {
+      // Check if all required environment variables are present
+      const requiredEnvVars = [
+        'NEXT_PUBLIC_FIREBASE_API_KEY',
+        'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN', 
+        'NEXT_PUBLIC_FIREBASE_PROJECT_ID'
+      ];
+
+      const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+      
+      if (missingVars.length > 0) {
+        console.error('❌ Missing Firebase environment variables:', missingVars);
+        console.log('🔧 Required Firebase env vars:', requiredEnvVars);
+        this.db = null;
+        return;
+      }
+
+      console.log('🔧 Initializing Firebase with config:', {
+        projectId: firebaseConfig.projectId,
+        authDomain: firebaseConfig.authDomain,
+        hasApiKey: !!firebaseConfig.apiKey
+      });
+
       const app = initializeApp(firebaseConfig);
       this.db = getFirestore(app);
-      console.log('✅ Firebase initialized');
+      
+      console.log('✅ Firebase initialized successfully');
     } catch (error) {
       console.error('❌ Firebase initialization failed:', error);
-      process.exit(1);
+      console.error('Config state:', firebaseConfig);
+      this.db = null;
+      
+      // Don't exit process - continue without Firebase
+      console.log('⚠️ Continuing without Firebase (some features disabled)');
     }
   }
 
@@ -166,7 +193,17 @@ class LighterBackgroundService {
     }
   }
 
+  // Helper to check if Firebase is available
+  isFirebaseReady() {
+    return this.db !== null;
+  }
+
   async saveBalanceUpdate(data) {
+    if (!this.isFirebaseReady()) {
+      console.warn('⚠️ Firebase not ready, skipping balance update');
+      return;
+    }
+
     try {
       await setDoc(doc(this.db, 'lighterData', 'balance'), {
         ...data,
@@ -182,6 +219,11 @@ class LighterBackgroundService {
   }
 
   async savePositionUpdate(data) {
+    if (!this.isFirebaseReady()) {
+      console.warn('⚠️ Firebase not ready, skipping position update');
+      return;
+    }
+
     try {
       await addDoc(collection(this.db, 'lighterData', 'positions', 'history'), {
         ...data,
@@ -197,6 +239,11 @@ class LighterBackgroundService {
   }
 
   async saveTradeExecution(data) {
+    if (!this.isFirebaseReady()) {
+      console.warn('⚠️ Firebase not ready, skipping trade execution save');
+      return;
+    }
+
     try {
       await addDoc(collection(this.db, 'lighterData', 'trades', 'executions'), {
         ...data,
@@ -211,12 +258,19 @@ class LighterBackgroundService {
   }
 
   async saveMarketData(data) {
+    if (!this.isFirebaseReady()) {
+      console.warn('⚠️ Firebase not ready, skipping market data save');
+      return;
+    }
+
     try {
       await setDoc(doc(this.db, 'marketData', 'latest'), {
         ...data,
         timestamp: serverTimestamp(),
         lastUpdate: new Date().toISOString()
       }, { merge: true });
+
+      console.log('📈 Market data saved');
 
       // Also save to agents for context
       if (data.btcPrice) {
@@ -230,6 +284,12 @@ class LighterBackgroundService {
 
   async updateAgentContext(marketData) {
     try {
+      // Check if Firebase is properly initialized
+      if (!this.db) {
+        console.warn('⚠️ Firebase not initialized, skipping agent context update');
+        return;
+      }
+
       // Update market context that agents will use
       await setDoc(doc(this.db, 'agentContext', 'market'), {
         btcPrice: marketData.btcPrice,
@@ -242,8 +302,17 @@ class LighterBackgroundService {
         lastUpdate: new Date().toISOString()
       }, { merge: true });
 
+      console.log('✅ Agent context updated successfully');
+
     } catch (error) {
       console.error('❌ Error updating agent context:', error);
+      console.error('Firebase DB state:', this.db ? 'initialized' : 'null');
+      
+      // Try to reinitialize Firebase if it's null
+      if (!this.db) {
+        console.log('🔄 Attempting to reinitialize Firebase...');
+        this.initializeFirebase();
+      }
     }
   }
 
