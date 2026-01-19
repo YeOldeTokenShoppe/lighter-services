@@ -466,6 +466,7 @@ class LighterStandaloneService {
     this.startAgentContextUpdates();
     this.startLighterDataUpdates(); // Add Lighter trading data
     this.startSentimentDataUpdates(); // Add sentiment/trending data
+    this.startTechnicalDataUpdates(); // Add OHLC technical data for TeknoScreen
     this.startHealthCheck();
 
     console.log('✅ Service started in standalone mode');
@@ -947,6 +948,290 @@ class LighterStandaloneService {
     if (num >= 1000000) return `$${(num / 1000000).toFixed(1)}M`;
     if (num >= 1000) return `$${(num / 1000).toFixed(0)}K`;
     return `$${num.toFixed(0)}`;
+  }
+
+  startTechnicalDataUpdates() {
+    // Update OHLC technical data every 60 seconds
+    const updateTechnicalData = async () => {
+      if (!this.isRunning) return;
+
+      try {
+        console.log('📊 Fetching OHLC technical data...');
+        const technicalData = await this.fetchOHLCData();
+        if (technicalData && Object.keys(technicalData).length > 0) {
+          await this.saveTechnicalData(technicalData);
+        }
+      } catch (error) {
+        console.error('❌ Error fetching technical data:', error.message);
+      }
+    };
+
+    // Run immediately on start
+    updateTechnicalData();
+
+    // Then every 60 seconds
+    setInterval(updateTechnicalData, 60000);
+
+    console.log('📊 Started technical data updates (60s interval)');
+  }
+
+  async fetchOHLCData() {
+    const symbols = ['BTC', 'ETH', 'SOL', 'XRP'];
+    const symbolMap = {
+      'BTC': 'bitcoin',
+      'ETH': 'ethereum',
+      'SOL': 'solana',
+      'XRP': 'ripple'
+    };
+
+    const results = {};
+
+    // Fetch current prices first
+    try {
+      await this.rateLimiter.throttle();
+      const priceResponse = await axios.get(
+        'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,ripple&vs_currencies=usd&include_24hr_change=true',
+        { timeout: 10000 }
+      );
+      var currentPrices = priceResponse.data || {};
+    } catch (error) {
+      console.log('⚠️ Failed to fetch current prices:', error.message);
+      var currentPrices = {};
+    }
+
+    // Fetch OHLC data for each symbol
+    for (const symbol of symbols) {
+      const coinId = symbolMap[symbol];
+
+      try {
+        await this.rateLimiter.throttle();
+        const response = await axios.get(
+          `https://api.coingecko.com/api/v3/coins/${coinId}/ohlc?vs_currency=usd&days=7`,
+          { timeout: 10000 }
+        );
+
+        if (Array.isArray(response.data) && response.data.length > 0) {
+          // Convert CoinGecko OHLC format to our format
+          const candles = response.data.map(candle => {
+            const [timestamp, open, high, low, close] = candle;
+            return {
+              time: Math.floor(timestamp / 1000),
+              open,
+              high,
+              low,
+              close,
+              volume: (high - low) * 1000000 // Estimated volume
+            };
+          });
+
+          // Calculate indicators
+          const indicators = this.calculateIndicators(candles);
+
+          // Get current price
+          const realPrice = currentPrices[coinId]?.usd || candles[candles.length - 1].close;
+
+          // Calculate trend
+          const priceChange = ((candles[candles.length - 1].close - candles[0].close) / candles[0].close) * 100;
+          const trend = priceChange > 1 ? 'bullish' : priceChange < -1 ? 'bearish' : 'sideways';
+
+          // Support and resistance from recent candles
+          const recentCandles = candles.slice(-20);
+          const support = Math.min(...recentCandles.map(c => c.low));
+          const resistance = Math.max(...recentCandles.map(c => c.high));
+
+          results[symbol] = {
+            candles,
+            indicators,
+            current: {
+              price: realPrice,
+              rsi: indicators.rsi[indicators.rsi.length - 1]?.value || 50,
+              macd: indicators.macd[indicators.macd.length - 1]?.value || 0,
+              macdSignal: indicators.macdSignal[indicators.macdSignal.length - 1]?.value || 0,
+              macdHistogram: indicators.macdHistogram[indicators.macdHistogram.length - 1]?.value || 0,
+              trend,
+              support,
+              resistance
+            }
+          };
+
+          console.log(`✅ OHLC data fetched for ${symbol}: ${candles.length} candles, price $${realPrice.toFixed(2)}`);
+        }
+      } catch (error) {
+        console.log(`⚠️ Failed to fetch OHLC for ${symbol}:`, error.message);
+      }
+    }
+
+    return results;
+  }
+
+  calculateIndicators(candles) {
+    // Calculate EMA
+    const calculateEMA = (data, period) => {
+      const k = 2 / (period + 1);
+      const result = [];
+      let ema = data[0]?.close || 0;
+
+      for (let i = 0; i < data.length; i++) {
+        ema = data[i].close * k + ema * (1 - k);
+        result.push({ time: data[i].time, value: ema });
+      }
+      return result;
+    };
+
+    // Calculate SMA
+    const calculateSMA = (data, period) => {
+      const result = [];
+      for (let i = 0; i < data.length; i++) {
+        if (i < period - 1) {
+          result.push({ time: data[i].time, value: null });
+          continue;
+        }
+        let sum = 0;
+        for (let j = 0; j < period; j++) {
+          sum += data[i - j].close;
+        }
+        result.push({ time: data[i].time, value: sum / period });
+      }
+      return result;
+    };
+
+    // Calculate RSI
+    const calculateRSI = (data, period = 14) => {
+      if (data.length < period + 1) {
+        return data.map(d => ({ time: d.time, value: 50 }));
+      }
+
+      const result = [];
+      let avgGain = 0;
+      let avgLoss = 0;
+
+      for (let i = 1; i <= period; i++) {
+        const change = data[i].close - data[i - 1].close;
+        if (change > 0) avgGain += change;
+        else avgLoss -= change;
+      }
+      avgGain /= period;
+      avgLoss /= period;
+
+      for (let i = 0; i < period; i++) {
+        result.push({ time: data[i].time, value: null });
+      }
+
+      const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+      result.push({ time: data[period].time, value: 100 - (100 / (1 + rs)) });
+
+      for (let i = period + 1; i < data.length; i++) {
+        const change = data[i].close - data[i - 1].close;
+        const gain = change > 0 ? change : 0;
+        const loss = change < 0 ? -change : 0;
+
+        avgGain = (avgGain * (period - 1) + gain) / period;
+        avgLoss = (avgLoss * (period - 1) + loss) / period;
+
+        const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+        result.push({ time: data[i].time, value: 100 - (100 / (1 + rs)) });
+      }
+      return result;
+    };
+
+    // Calculate MACD
+    const calculateMACD = (data) => {
+      if (data.length < 26) {
+        return {
+          macd: data.map(d => ({ time: d.time, value: 0 })),
+          signal: data.map(d => ({ time: d.time, value: 0 })),
+          histogram: data.map(d => ({ time: d.time, value: 0 }))
+        };
+      }
+
+      const fastEMA = calculateEMA(data, 12);
+      const slowEMA = calculateEMA(data, 26);
+
+      const macdLine = data.map((d, i) => ({
+        time: d.time,
+        value: fastEMA[i].value - slowEMA[i].value
+      }));
+
+      const k = 2 / 10;
+      let signalEMA = macdLine[0].value;
+      const signal = [];
+      const histogram = [];
+
+      for (let i = 0; i < macdLine.length; i++) {
+        signalEMA = macdLine[i].value * k + signalEMA * (1 - k);
+        signal.push({ time: macdLine[i].time, value: signalEMA });
+        histogram.push({
+          time: macdLine[i].time,
+          value: macdLine[i].value - signalEMA
+        });
+      }
+
+      return { macd: macdLine, signal, histogram };
+    };
+
+    // Calculate Bollinger Bands
+    const calculateBollinger = (data, period = 20) => {
+      const sma = calculateSMA(data, period);
+      const upper = [];
+      const lower = [];
+
+      for (let i = 0; i < data.length; i++) {
+        if (i < period - 1 || sma[i].value === null) {
+          upper.push({ time: data[i].time, value: null });
+          lower.push({ time: data[i].time, value: null });
+          continue;
+        }
+
+        let sumSquaredDiff = 0;
+        for (let j = 0; j < period; j++) {
+          const diff = data[i - j].close - sma[i].value;
+          sumSquaredDiff += diff * diff;
+        }
+        const stdDev = Math.sqrt(sumSquaredDiff / period);
+
+        upper.push({ time: data[i].time, value: sma[i].value + (stdDev * 2) });
+        lower.push({ time: data[i].time, value: sma[i].value - (stdDev * 2) });
+      }
+
+      return { upper, middle: sma, lower };
+    };
+
+    const ema12 = calculateEMA(candles, 12);
+    const ema26 = calculateEMA(candles, 26);
+    const rsi = calculateRSI(candles, 14);
+    const macdResult = calculateMACD(candles);
+    const bollinger = calculateBollinger(candles, 20);
+
+    return {
+      ema12,
+      ema26,
+      rsi,
+      macd: macdResult.macd,
+      macdSignal: macdResult.signal,
+      macdHistogram: macdResult.histogram,
+      bollingerUpper: bollinger.upper,
+      bollingerMiddle: bollinger.middle,
+      bollingerLower: bollinger.lower
+    };
+  }
+
+  async saveTechnicalData(data) {
+    if (!this.db) {
+      console.log('⚠️ Skipping technical data save - Firebase not available');
+      return;
+    }
+
+    try {
+      await this.db.collection('technicalData').doc('latest').set({
+        ...data,
+        updatedAt: new Date().toISOString(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      console.log(`📊 Technical data saved: ${Object.keys(data).join(', ')}`);
+    } catch (error) {
+      console.error('❌ Error saving technical data:', error.message);
+    }
   }
 
   async fetchLighterData() {
