@@ -815,7 +815,7 @@ class LighterStandaloneService {
       console.log(`🔐 Creating Lighter auth token...`);
       const auth = await this.createLighterAuthToken();
       
-      const url = `${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}`;
+      const url = `${this.lighterConfig.baseUrl}/api/v1/account?by=index&value=${this.lighterConfig.accountIndex}`;
       console.log(`🌐 Fetching Lighter account from: ${url}`);
       
       // Build headers based on Lighter authentication requirements
@@ -886,7 +886,7 @@ class LighterStandaloneService {
       
       // Get positions with rate limiting
       await this.rateLimiter.throttle();
-      const positionsResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/positions`, {
+      const positionsResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/positions?by=index&value=${this.lighterConfig.accountIndex}`, {
           headers: {
             'Authorization': `Bearer ${auth.signature}`,
             'X-Timestamp': auth.timestamp,
@@ -898,7 +898,7 @@ class LighterStandaloneService {
         
       // Get orders with rate limiting
       await this.rateLimiter.throttle();
-      const ordersResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/accounts/${this.lighterConfig.accountIndex}/orders`, {
+      const ordersResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/orders?by=index&value=${this.lighterConfig.accountIndex}`, {
         headers: {
           'Authorization': `Bearer ${auth.signature}`,
           'X-Timestamp': auth.timestamp,
