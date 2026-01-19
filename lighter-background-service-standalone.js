@@ -13,6 +13,9 @@ const admin = require('firebase-admin');
 const { Wallet } = require('ethers');
 const fs = require('fs');
 const path = require('path');
+const googleTrends = require('google-trends-api');
+const gplay = require('google-play-scraper');
+const appStore = require('app-store-scraper');
 
 // Rate limiting helper
 class RateLimiter {
@@ -590,11 +593,13 @@ class LighterStandaloneService {
       trendingTopics: [],
       polymarket: null,
       whaleActivity: { activity: 'Unknown', confidence: 0 },
-      fundingRates: { btc: null, eth: null },
+      googleTrends: { btc: null, eth: null },
+      appRankings: { coinbase: null, binance: null, metamask: null },
       dataStatus: {
         trending: 'unavailable',
         whale: 'unavailable',
-        funding: 'unavailable'
+        googleTrends: 'unavailable',
+        appRankings: 'unavailable'
       }
     };
 
@@ -764,26 +769,98 @@ class LighterStandaloneService {
       console.log('⚠️ Whale activity fetch failed:', error.message);
     }
 
-    // Fetch funding rates from Binance (free)
+    // Fetch Google Trends for Bitcoin (free)
     try {
-      console.log('💰 Fetching funding rates...');
+      console.log('📈 Fetching Google Trends...');
       await this.rateLimiter.throttle();
-      const [btcRes, ethRes] = await Promise.all([
-        axios.get('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT', { timeout: 10000 }),
-        axios.get('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=ETHUSDT', { timeout: 10000 })
-      ]);
 
-      results.fundingRates = {
-        btc: btcRes.data?.lastFundingRate ? (parseFloat(btcRes.data.lastFundingRate) * 100).toFixed(4) : null,
-        eth: ethRes.data?.lastFundingRate ? (parseFloat(ethRes.data.lastFundingRate) * 100).toFixed(4) : null
-      };
+      const trendsData = await googleTrends.interestOverTime({
+        keyword: 'bitcoin',
+        startTime: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
+        geo: 'US'
+      });
 
-      if (results.fundingRates.btc !== null) {
-        results.dataStatus.funding = 'live';
-        console.log(`✅ Funding rates: BTC=${results.fundingRates.btc}%, ETH=${results.fundingRates.eth}%`);
+      const parsed = JSON.parse(trendsData);
+      const timeline = parsed.default?.timelineData || [];
+
+      if (timeline.length > 0) {
+        // Get the most recent value (0-100 scale)
+        const latestValue = timeline[timeline.length - 1]?.value?.[0] || 0;
+        // Get average of last 7 data points for comparison
+        const recentValues = timeline.slice(-7).map(t => t.value?.[0] || 0);
+        const avgValue = Math.round(recentValues.reduce((a, b) => a + b, 0) / recentValues.length);
+
+        results.googleTrends = {
+          btc: latestValue,
+          btcAvg: avgValue,
+          trend: latestValue > avgValue ? 'rising' : latestValue < avgValue ? 'falling' : 'stable'
+        };
+        results.dataStatus.googleTrends = 'live';
+        results.dataStatus.googleTrendsValue = latestValue; // For display
+        console.log(`✅ Google Trends: BTC=${latestValue} (avg=${avgValue}, ${results.googleTrends.trend})`);
       }
     } catch (error) {
-      console.log('⚠️ Funding rates fetch failed:', error.message);
+      console.log('⚠️ Google Trends fetch failed:', error.message);
+    }
+
+    // Fetch App Store Rankings (free scraping)
+    try {
+      console.log('📱 Fetching App Store rankings...');
+      await this.rateLimiter.throttle();
+
+      // Crypto app IDs
+      const apps = {
+        coinbase: { ios: '886427730', android: 'com.coinbase.android' },
+        binance: { ios: '1436799971', android: 'com.binance.dev' },
+        metamask: { ios: '1438144202', android: 'io.metamask' }
+      };
+
+      const rankings = {};
+
+      // Fetch iOS rankings
+      for (const [appName, ids] of Object.entries(apps)) {
+        try {
+          const iosApp = await appStore.app({ id: ids.ios });
+          rankings[appName] = {
+            ios: {
+              rank: iosApp.position || null, // Position in charts if available
+              rating: iosApp.score || null,
+              reviews: iosApp.reviews || null
+            }
+          };
+        } catch (err) {
+          rankings[appName] = { ios: { rank: null, rating: null, reviews: null } };
+        }
+
+        try {
+          await this.rateLimiter.throttle();
+          const androidApp = await gplay.app({ appId: ids.android });
+          rankings[appName].android = {
+            rating: androidApp.score || null,
+            reviews: androidApp.reviews || null,
+            installs: androidApp.installs || null
+          };
+        } catch (err) {
+          if (!rankings[appName]) rankings[appName] = {};
+          rankings[appName].android = { rating: null, reviews: null, installs: null };
+        }
+      }
+
+      results.appRankings = rankings;
+
+      // Check if we got any data
+      const hasData = Object.values(rankings).some(app =>
+        app.ios?.rating || app.android?.rating
+      );
+
+      if (hasData) {
+        results.dataStatus.appRankings = 'live';
+        console.log('✅ App rankings fetched:', Object.keys(rankings).map(app =>
+          `${app}: iOS=${rankings[app].ios?.rating?.toFixed(1) || 'N/A'}, Android=${rankings[app].android?.rating?.toFixed(1) || 'N/A'}`
+        ).join(', '));
+      }
+    } catch (error) {
+      console.log('⚠️ App rankings fetch failed:', error.message);
     }
 
     // Deduplicate trending topics
@@ -819,7 +896,8 @@ class LighterStandaloneService {
         trendingTopics: data.trendingTopics,
         polymarket: data.polymarket,
         whaleActivity: data.whaleActivity,
-        fundingRates: data.fundingRates,
+        googleTrends: data.googleTrends,
+        appRankings: data.appRankings,
         dataStatus: {
           fearGreed: agentContext.fearGreed ? 'live' : 'unavailable',
           ...data.dataStatus
