@@ -462,6 +462,7 @@ class LighterStandaloneService {
     this.startMarketDataUpdates();
     this.startAgentContextUpdates();
     this.startLighterDataUpdates(); // Add Lighter trading data
+    this.startSentimentDataUpdates(); // Add sentiment/trending data
     this.startHealthCheck();
 
     console.log('✅ Service started in standalone mode');
@@ -559,6 +560,315 @@ class LighterStandaloneService {
     }, 1200000); // 20 minutes (20 * 60 * 1000ms)
 
     console.log('⚡ Started Lighter data updates (20min interval, well under 15min API limit)');
+  }
+
+  startSentimentDataUpdates() {
+    // Update sentiment data every 30 minutes (free APIs, rate limit friendly)
+    const updateSentiment = async () => {
+      if (!this.isRunning) return;
+
+      try {
+        console.log('🎭 Fetching sentiment data...');
+        const sentimentData = await this.fetchSentimentData();
+        await this.saveSentimentData(sentimentData);
+      } catch (error) {
+        console.error('❌ Error fetching sentiment data:', error.message);
+      }
+    };
+
+    // Run immediately on start
+    updateSentiment();
+
+    // Then every 30 minutes
+    setInterval(updateSentiment, 1800000); // 30 minutes
+
+    console.log('🎭 Started sentiment data updates (30min interval)');
+  }
+
+  async fetchSentimentData() {
+    const results = {
+      trendingTopics: [],
+      polymarket: null,
+      whaleActivity: { activity: 'Unknown', confidence: 0 },
+      fundingRates: { btc: null, eth: null },
+      dataStatus: {
+        trending: 'unavailable',
+        whale: 'unavailable',
+        funding: 'unavailable'
+      }
+    };
+
+    // Fetch trending from Reddit (free, no API key)
+    try {
+      console.log('📱 Fetching Reddit trending...');
+      const subreddits = ['bitcoin', 'ethereum', 'cryptocurrency'];
+      const topics = [];
+
+      for (const sub of subreddits) {
+        try {
+          await this.rateLimiter.throttle();
+          const response = await axios.get(
+            `https://www.reddit.com/r/${sub}/hot.json?limit=5`,
+            {
+              headers: { 'User-Agent': 'TradingBot/1.0' },
+              timeout: 10000
+            }
+          );
+
+          if (response.data?.data?.children) {
+            for (const post of response.data.data.children.slice(0, 2)) {
+              const p = post.data;
+              if (p.stickied || p.score < 100) continue;
+
+              topics.push({
+                topic: this.truncateTitle(p.title, 40),
+                sentiment: this.analyzeSentiment(p.title, p.upvote_ratio),
+                mentions: p.num_comments || 0,
+                source: `r/${sub}`,
+                score: p.score
+              });
+            }
+          }
+        } catch (err) {
+          console.log(`⚠️ Reddit r/${sub} failed:`, err.message);
+        }
+      }
+
+      // Sort by engagement and take top 3
+      results.trendingTopics = topics
+        .sort((a, b) => (b.score + b.mentions) - (a.score + a.mentions))
+        .slice(0, 3);
+
+      if (results.trendingTopics.length > 0) {
+        results.dataStatus.trending = 'live';
+        console.log(`✅ Got ${results.trendingTopics.length} trending topics from Reddit`);
+      }
+    } catch (error) {
+      console.error('❌ Reddit fetch failed:', error.message);
+    }
+
+    // Fetch CoinGecko trending (free)
+    try {
+      console.log('🦎 Fetching CoinGecko trending...');
+      await this.rateLimiter.throttle();
+      const response = await axios.get(
+        'https://api.coingecko.com/api/v3/search/trending',
+        { timeout: 10000 }
+      );
+
+      if (response.data?.coins) {
+        for (const item of response.data.coins.slice(0, 2)) {
+          const coin = item.item;
+          const symbol = coin.symbol?.toUpperCase();
+          const isBtcEth = ['BTC', 'ETH', 'WBTC', 'WETH', 'STETH'].includes(symbol);
+
+          results.trendingTopics.push({
+            topic: `${coin.name} (${symbol}) trending`,
+            sentiment: 'neutral',
+            mentions: coin.score || 0,
+            source: 'coingecko',
+            priority: isBtcEth ? 1 : 0
+          });
+        }
+        console.log('✅ Got CoinGecko trending coins');
+      }
+    } catch (error) {
+      console.log('⚠️ CoinGecko trending failed:', error.message);
+    }
+
+    // Fetch Polymarket (free)
+    try {
+      console.log('🎰 Fetching Polymarket data...');
+      await this.rateLimiter.throttle();
+      const response = await axios.get(
+        'https://gamma-api.polymarket.com/markets?closed=false&limit=20',
+        {
+          headers: { 'Accept': 'application/json' },
+          timeout: 10000
+        }
+      );
+
+      if (Array.isArray(response.data) && response.data.length > 0) {
+        // Filter for crypto-related markets
+        const cryptoMarkets = response.data.filter(m => {
+          const q = (m.question || '').toLowerCase();
+          return q.includes('bitcoin') || q.includes('btc') ||
+                 q.includes('ethereum') || q.includes('eth') ||
+                 q.includes('crypto');
+        });
+
+        const marketsToUse = cryptoMarkets.length > 0 ? cryptoMarkets : response.data;
+
+        results.polymarket = {
+          markets: marketsToUse.slice(0, 5).map(market => {
+            const prices = market.outcomePrices || [];
+            return {
+              title: market.question || 'Unknown',
+              yes: prices[0] ? Math.round(parseFloat(prices[0]) * 100) : 50,
+              no: prices[1] ? Math.round(parseFloat(prices[1]) * 100) : 50,
+              volume: this.formatVolume(market.volume || 0)
+            };
+          }),
+          source: 'polymarket_real'
+        };
+        console.log(`✅ Got ${results.polymarket.markets.length} Polymarket predictions`);
+      }
+    } catch (error) {
+      console.log('⚠️ Polymarket fetch failed:', error.message);
+    }
+
+    // Fetch whale activity from Binance large trades (free)
+    try {
+      console.log('🐋 Fetching whale activity...');
+      await this.rateLimiter.throttle();
+      const response = await axios.get(
+        'https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit=100',
+        { timeout: 10000 }
+      );
+
+      if (Array.isArray(response.data)) {
+        let buyVolume = 0;
+        let sellVolume = 0;
+
+        response.data.forEach(trade => {
+          const value = parseFloat(trade.p) * parseFloat(trade.q);
+          if (value > 100000) { // Only count large trades > $100k
+            if (trade.m) {
+              sellVolume += value;
+            } else {
+              buyVolume += value;
+            }
+          }
+        });
+
+        const ratio = buyVolume / (sellVolume || 1);
+
+        if (ratio > 1.3) {
+          results.whaleActivity = {
+            activity: 'Accumulating',
+            confidence: Math.min(100, Math.round((ratio - 1) * 50))
+          };
+        } else if (ratio < 0.7) {
+          results.whaleActivity = {
+            activity: 'Distributing',
+            confidence: Math.min(100, Math.round((1 - ratio) * 50))
+          };
+        } else {
+          results.whaleActivity = { activity: 'Normal', confidence: 50 };
+        }
+
+        results.dataStatus.whale = 'live';
+        console.log(`✅ Whale activity: ${results.whaleActivity.activity} (${results.whaleActivity.confidence}%)`);
+      }
+    } catch (error) {
+      console.log('⚠️ Whale activity fetch failed:', error.message);
+    }
+
+    // Fetch funding rates from Binance (free)
+    try {
+      console.log('💰 Fetching funding rates...');
+      await this.rateLimiter.throttle();
+      const [btcRes, ethRes] = await Promise.all([
+        axios.get('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT', { timeout: 10000 }),
+        axios.get('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=ETHUSDT', { timeout: 10000 })
+      ]);
+
+      results.fundingRates = {
+        btc: btcRes.data?.lastFundingRate ? (parseFloat(btcRes.data.lastFundingRate) * 100).toFixed(4) : null,
+        eth: ethRes.data?.lastFundingRate ? (parseFloat(ethRes.data.lastFundingRate) * 100).toFixed(4) : null
+      };
+
+      if (results.fundingRates.btc !== null) {
+        results.dataStatus.funding = 'live';
+        console.log(`✅ Funding rates: BTC=${results.fundingRates.btc}%, ETH=${results.fundingRates.eth}%`);
+      }
+    } catch (error) {
+      console.log('⚠️ Funding rates fetch failed:', error.message);
+    }
+
+    // Deduplicate trending topics
+    const seen = new Set();
+    results.trendingTopics = results.trendingTopics.filter(t => {
+      const key = t.topic.toLowerCase().substring(0, 20);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 3);
+
+    return results;
+  }
+
+  async saveSentimentData(data) {
+    if (!this.db) {
+      console.log('⚠️ Skipping sentiment save - Firebase not available');
+      console.log('🎭 Sentiment data would be:', JSON.stringify(data, null, 2));
+      return;
+    }
+
+    try {
+      // Also get Fear & Greed from agent context (already fetched there)
+      const agentContextRef = this.db.collection('agentContext').doc('market');
+      const agentContextSnap = await agentContextRef.get();
+      const agentContext = agentContextSnap.exists ? agentContextSnap.data() : {};
+
+      const sentimentDoc = {
+        fearGreed: {
+          value: agentContext.fearGreed || 0,
+          label: this.getFearGreedLabel(agentContext.fearGreed || 0)
+        },
+        trendingTopics: data.trendingTopics,
+        polymarket: data.polymarket,
+        whaleActivity: data.whaleActivity,
+        fundingRates: data.fundingRates,
+        dataStatus: {
+          fearGreed: agentContext.fearGreed ? 'live' : 'unavailable',
+          ...data.dataStatus
+        },
+        updatedAt: new Date().toISOString(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      await this.db.collection('sentimentData').doc('latest').set(sentimentDoc, { merge: true });
+      console.log('✅ Sentiment data saved to Firestore');
+    } catch (error) {
+      console.error('❌ Error saving sentiment data:', error.message);
+    }
+  }
+
+  getFearGreedLabel(value) {
+    if (value >= 75) return 'Extreme Greed';
+    if (value >= 55) return 'Greed';
+    if (value >= 45) return 'Neutral';
+    if (value >= 25) return 'Fear';
+    return 'Extreme Fear';
+  }
+
+  truncateTitle(title, maxLen) {
+    if (!title) return 'Unknown';
+    if (title.length <= maxLen) return title;
+    return title.substring(0, maxLen - 2) + '..';
+  }
+
+  analyzeSentiment(text, upvoteRatio = 0.5) {
+    const lower = text.toLowerCase();
+    const bullish = ['surge', 'soar', 'rally', 'bullish', 'ath', 'moon', 'pump', 'gains', 'breakout', 'approved'];
+    const bearish = ['crash', 'dump', 'plunge', 'bearish', 'fear', 'sell', 'drop', 'hack', 'scam', 'ban'];
+
+    const hasBullish = bullish.some(word => lower.includes(word));
+    const hasBearish = bearish.some(word => lower.includes(word));
+
+    if (hasBullish && !hasBearish) return 'bullish';
+    if (hasBearish && !hasBullish) return 'bearish';
+    if (upvoteRatio > 0.7) return 'bullish';
+    if (upvoteRatio < 0.4) return 'bearish';
+    return 'neutral';
+  }
+
+  formatVolume(volume) {
+    const num = parseFloat(volume) || 0;
+    if (num >= 1000000) return `$${(num / 1000000).toFixed(1)}M`;
+    if (num >= 1000) return `$${(num / 1000).toFixed(0)}K`;
+    return `$${num.toFixed(0)}`;
   }
 
   async fetchLighterData() {
