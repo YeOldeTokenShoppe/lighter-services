@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Background service to maintain connection with Lighter trading API",
   "main": "lighter-background-service-standalone.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node lighter-background-service-standalone.js",
     "dev": "nodemon lighter-background-service-standalone.js",
