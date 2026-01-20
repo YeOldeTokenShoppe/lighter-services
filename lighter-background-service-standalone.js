@@ -673,6 +673,10 @@ class LighterStandaloneService {
     if (!this.db) return;
 
     try {
+      // Calculate expireAt for TTL (30 days from now for trade history)
+      const expireAt = new Date();
+      expireAt.setDate(expireAt.getDate() + 30);
+
       const logEntry = {
         decision: {
           action: decision.action,
@@ -694,7 +698,8 @@ class LighterStandaloneService {
           tradingHalted: this.tradingState.tradingHalted
         },
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        expireAt: expireAt  // TTL field - document expires after 30 days
       };
 
       await this.db.collection('tradeHistory').add(logEntry);
