@@ -281,6 +281,438 @@ class LighterStandaloneService {
     this.initializeFirebase().catch(error => {
       console.error('❌ Firebase initialization failed during construction:', error.message);
     });
+
+    // =========================================================================
+    // TRADE EXECUTION CONFIGURATION
+    // =========================================================================
+    this.tradingConfig = {
+      enabled: process.env.TRADING_ENABLED === 'true',  // Must explicitly enable
+      maxPositionSizeUSD: parseFloat(process.env.MAX_POSITION_SIZE_USD || '100'),  // Max $100 per trade
+      maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '10'),
+      maxDailyLossUSD: parseFloat(process.env.MAX_DAILY_LOSS_USD || '50'),  // Stop trading if down $50
+      minConfidence: parseFloat(process.env.MIN_TRADE_CONFIDENCE || '0.6'),  // Minimum 60% confidence
+      allowedSymbols: ['ETH', 'BTC'],  // Only trade these
+      cooldownMs: parseInt(process.env.TRADE_COOLDOWN_MS || '300000'),  // 5 min between trades
+    };
+
+    // Trading state tracking
+    this.tradingState = {
+      lastTradeTime: 0,
+      dailyTradeCount: 0,
+      dailyPnL: 0,
+      lastDecisionId: null,
+      positions: new Map(),
+      pendingOrders: new Map(),
+      tradingHalted: false,
+      haltReason: null
+    };
+
+    // Reset daily stats at midnight UTC
+    this.scheduleDailyReset();
+
+    console.log('💰 Trading Configuration:', {
+      enabled: this.tradingConfig.enabled,
+      maxPositionSize: `$${this.tradingConfig.maxPositionSizeUSD}`,
+      maxDailyTrades: this.tradingConfig.maxDailyTrades,
+      minConfidence: `${this.tradingConfig.minConfidence * 100}%`
+    });
+  }
+
+  // =========================================================================
+  // DAILY RESET SCHEDULER
+  // =========================================================================
+  scheduleDailyReset() {
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setUTCHours(0, 0, 0, 0);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+
+    const msUntilMidnight = tomorrow.getTime() - now.getTime();
+
+    setTimeout(() => {
+      this.resetDailyStats();
+      // Schedule next reset
+      setInterval(() => this.resetDailyStats(), 24 * 60 * 60 * 1000);
+    }, msUntilMidnight);
+
+    console.log(`⏰ Daily stats reset scheduled in ${Math.round(msUntilMidnight / 1000 / 60)} minutes`);
+  }
+
+  resetDailyStats() {
+    console.log('🔄 Resetting daily trading stats...');
+    this.tradingState.dailyTradeCount = 0;
+    this.tradingState.dailyPnL = 0;
+
+    // Un-halt trading if it was halted due to daily limits
+    if (this.tradingState.tradingHalted &&
+        this.tradingState.haltReason?.includes('daily')) {
+      this.tradingState.tradingHalted = false;
+      this.tradingState.haltReason = null;
+      console.log('✅ Trading un-halted after daily reset');
+    }
+  }
+
+  // =========================================================================
+  // RL80 DECISION LISTENER - Watches Firebase for trading decisions
+  // =========================================================================
+  startDecisionListener() {
+    if (!this.db) {
+      console.log('⚠️ Cannot start decision listener - Firebase not available');
+      return;
+    }
+
+    if (!this.tradingConfig.enabled) {
+      console.log('⚠️ Trading is DISABLED. Set TRADING_ENABLED=true to enable.');
+      console.log('📊 Decision listener will log decisions but NOT execute trades.');
+    }
+
+    console.log('👂 Starting RL80 decision listener...');
+
+    // Listen to agentDecisions/RL80 for real-time updates
+    const decisionRef = this.db.collection('agentDecisions').doc('RL80');
+
+    this.decisionUnsubscribe = decisionRef.onSnapshot(
+      async (snapshot) => {
+        if (!snapshot.exists) {
+          console.log('📭 No RL80 decision document found');
+          return;
+        }
+
+        const decision = snapshot.data();
+
+        // Skip if we've already processed this decision
+        if (decision.timestamp === this.tradingState.lastDecisionId) {
+          return;
+        }
+
+        console.log('');
+        console.log('═'.repeat(60));
+        console.log('📥 NEW RL80 DECISION RECEIVED');
+        console.log('═'.repeat(60));
+        console.log(`  Action: ${decision.action}`);
+        console.log(`  Symbol: ${decision.symbol}`);
+        console.log(`  Confidence: ${(decision.confidence * 100).toFixed(1)}%`);
+        console.log(`  Reasoning: ${decision.reasoning}`);
+        console.log(`  Timestamp: ${new Date(decision.timestamp).toISOString()}`);
+        console.log('═'.repeat(60));
+
+        // Mark as processed
+        this.tradingState.lastDecisionId = decision.timestamp;
+
+        // Process the decision
+        await this.processDecision(decision);
+      },
+      (error) => {
+        console.error('❌ Decision listener error:', error.message);
+      }
+    );
+
+    console.log('✅ RL80 decision listener started');
+  }
+
+  // =========================================================================
+  // DECISION PROCESSING - Validates and executes trading decisions
+  // =========================================================================
+  async processDecision(decision) {
+    const { action, symbol, confidence, reasoning } = decision;
+
+    // Log to trade history
+    await this.logTradeDecision(decision, 'received');
+
+    // HOLD actions - just acknowledge
+    if (action === 'HOLD' || action === 'EMERGENCY_STOP') {
+      if (action === 'EMERGENCY_STOP') {
+        this.tradingState.tradingHalted = true;
+        this.tradingState.haltReason = `Emergency stop: ${reasoning}`;
+        console.log('🛑 EMERGENCY STOP - Trading halted');
+        await this.logTradeDecision(decision, 'emergency_stop');
+      } else {
+        console.log('⏸️ HOLD - No action taken');
+      }
+      return;
+    }
+
+    // Validate decision before execution
+    const validation = this.validateDecision(decision);
+
+    if (!validation.valid) {
+      console.log(`❌ Decision rejected: ${validation.reason}`);
+      await this.logTradeDecision(decision, 'rejected', validation.reason);
+      return;
+    }
+
+    // Check if trading is enabled
+    if (!this.tradingConfig.enabled) {
+      console.log('⚠️ Trading disabled - would have executed:');
+      console.log(`   ${action} ${symbol} at ${confidence * 100}% confidence`);
+      await this.logTradeDecision(decision, 'simulated');
+      return;
+    }
+
+    // Execute the trade
+    try {
+      console.log(`🚀 Executing ${action} for ${symbol}...`);
+      const result = await this.executeTrade(decision);
+
+      if (result.success) {
+        console.log(`✅ Trade executed successfully!`);
+        console.log(`   Order ID: ${result.orderId}`);
+        console.log(`   Size: ${result.size}`);
+        console.log(`   Price: ${result.price}`);
+
+        // Update trading state
+        this.tradingState.lastTradeTime = Date.now();
+        this.tradingState.dailyTradeCount++;
+
+        await this.logTradeDecision(decision, 'executed', null, result);
+      } else {
+        console.log(`❌ Trade failed: ${result.error}`);
+        await this.logTradeDecision(decision, 'failed', result.error);
+      }
+    } catch (error) {
+      console.error(`❌ Trade execution error: ${error.message}`);
+      await this.logTradeDecision(decision, 'error', error.message);
+    }
+  }
+
+  // =========================================================================
+  // DECISION VALIDATION - Safety checks before execution
+  // =========================================================================
+  validateDecision(decision) {
+    const { action, symbol, confidence } = decision;
+
+    // Check if trading is halted
+    if (this.tradingState.tradingHalted) {
+      return { valid: false, reason: `Trading halted: ${this.tradingState.haltReason}` };
+    }
+
+    // Check action type
+    if (!['BUY', 'SELL'].includes(action)) {
+      return { valid: false, reason: `Invalid action: ${action}` };
+    }
+
+    // Check symbol
+    if (!this.tradingConfig.allowedSymbols.includes(symbol)) {
+      return { valid: false, reason: `Symbol not allowed: ${symbol}` };
+    }
+
+    // Check confidence threshold
+    if (confidence < this.tradingConfig.minConfidence) {
+      return { valid: false, reason: `Confidence too low: ${(confidence * 100).toFixed(1)}% < ${this.tradingConfig.minConfidence * 100}%` };
+    }
+
+    // Check daily trade limit
+    if (this.tradingState.dailyTradeCount >= this.tradingConfig.maxDailyTrades) {
+      return { valid: false, reason: `Daily trade limit reached: ${this.tradingState.dailyTradeCount}/${this.tradingConfig.maxDailyTrades}` };
+    }
+
+    // Check daily loss limit
+    if (this.tradingState.dailyPnL <= -this.tradingConfig.maxDailyLossUSD) {
+      this.tradingState.tradingHalted = true;
+      this.tradingState.haltReason = 'Daily loss limit reached';
+      return { valid: false, reason: `Daily loss limit reached: $${Math.abs(this.tradingState.dailyPnL).toFixed(2)}` };
+    }
+
+    // Check cooldown
+    const timeSinceLastTrade = Date.now() - this.tradingState.lastTradeTime;
+    if (timeSinceLastTrade < this.tradingConfig.cooldownMs) {
+      const remainingCooldown = Math.ceil((this.tradingConfig.cooldownMs - timeSinceLastTrade) / 1000);
+      return { valid: false, reason: `Cooldown active: ${remainingCooldown}s remaining` };
+    }
+
+    // Check Lighter configuration
+    if (!this.lighterConfig.apiKey || !this.lighterConfig.walletPrivateKey) {
+      return { valid: false, reason: 'Lighter API keys not configured' };
+    }
+
+    return { valid: true };
+  }
+
+  // =========================================================================
+  // TRADE EXECUTION - Sends orders to Lighter DEX
+  // =========================================================================
+  async executeTrade(decision) {
+    const { action, symbol, confidence, position_size } = decision;
+
+    try {
+      // Get current market price
+      const marketData = await this.getMarketPrice(symbol);
+      if (!marketData) {
+        return { success: false, error: 'Could not fetch market price' };
+      }
+
+      // Calculate position size
+      const maxSize = this.tradingConfig.maxPositionSizeUSD;
+      const confidenceAdjustedSize = maxSize * confidence;
+      const positionSizeUSD = position_size || confidenceAdjustedSize;
+      const finalSizeUSD = Math.min(positionSizeUSD, maxSize);
+
+      // Convert USD to token amount
+      const tokenAmount = finalSizeUSD / marketData.price;
+
+      // Determine order side
+      const side = action === 'BUY' ? 'buy' : 'sell';
+      const market = `${symbol}-USD`;
+
+      console.log(`📝 Order details:`);
+      console.log(`   Market: ${market}`);
+      console.log(`   Side: ${side}`);
+      console.log(`   Size: ${tokenAmount.toFixed(6)} ${symbol} (~$${finalSizeUSD.toFixed(2)})`);
+      console.log(`   Price: $${marketData.price.toFixed(2)}`);
+
+      // Create auth token
+      const auth = await this.createLighterAuthToken();
+
+      // Build order payload
+      const orderPayload = {
+        market: this.getMarketIndex(symbol),
+        side: side === 'buy' ? 0 : 1,  // 0 = buy, 1 = sell
+        order_type: 1,  // Market order
+        base_amount: Math.floor(tokenAmount * 1e8),  // Convert to base units
+        price: 0,  // Market order doesn't need price
+        client_order_index: Date.now(),
+        time_in_force: 0,  // Immediate or cancel
+        account_index: this.lighterConfig.accountIndex,
+        api_key_index: this.lighterConfig.apiKeyIndex
+      };
+
+      // Sign the order
+      const walletKey = this.lighterConfig.walletPrivateKey.startsWith('0x')
+        ? this.lighterConfig.walletPrivateKey
+        : `0x${this.lighterConfig.walletPrivateKey}`;
+      const wallet = new Wallet(walletKey);
+      const message = JSON.stringify(orderPayload);
+      const signature = await wallet.signMessage(message);
+
+      // Send order to Lighter
+      await this.rateLimiter.throttle();
+      const response = await axios.post(
+        `${this.lighterConfig.baseUrl}/api/v1/transaction/send_tx`,
+        {
+          ...orderPayload,
+          signature
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${auth.authToken}`,
+            'X-API-Key': auth.apiKey,
+            'X-Signature': auth.signature,
+            'X-Account-Index': this.lighterConfig.accountIndex,
+            'X-API-Key-Index': this.lighterConfig.apiKeyIndex
+          },
+          timeout: 30000
+        }
+      );
+
+      if (response.data && response.data.success !== false) {
+        return {
+          success: true,
+          orderId: response.data.order_id || orderPayload.client_order_index,
+          size: tokenAmount,
+          price: marketData.price,
+          side,
+          market,
+          response: response.data
+        };
+      } else {
+        return {
+          success: false,
+          error: response.data?.error || 'Unknown error from Lighter'
+        };
+      }
+
+    } catch (error) {
+      console.error('Trade execution error:', error.response?.data || error.message);
+      return {
+        success: false,
+        error: error.response?.data?.message || error.message
+      };
+    }
+  }
+
+  // Get market index for Lighter API
+  getMarketIndex(symbol) {
+    const markets = {
+      'BTC': 0,
+      'ETH': 1,
+      'SOL': 2
+    };
+    return markets[symbol] ?? 1;  // Default to ETH
+  }
+
+  // Get current market price
+  async getMarketPrice(symbol) {
+    try {
+      const coinIds = {
+        'BTC': 'bitcoin',
+        'ETH': 'ethereum',
+        'SOL': 'solana'
+      };
+
+      const coinId = coinIds[symbol] || 'ethereum';
+      const response = await axios.get(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
+        { timeout: 10000 }
+      );
+
+      if (response.data && response.data[coinId]) {
+        return { price: response.data[coinId].usd };
+      }
+      return null;
+    } catch (error) {
+      console.error('Error fetching market price:', error.message);
+      return null;
+    }
+  }
+
+  // =========================================================================
+  // TRADE LOGGING - Records all trading activity to Firebase
+  // =========================================================================
+  async logTradeDecision(decision, status, reason = null, result = null) {
+    if (!this.db) return;
+
+    try {
+      const logEntry = {
+        decision: {
+          action: decision.action,
+          symbol: decision.symbol,
+          confidence: decision.confidence,
+          reasoning: decision.reasoning
+        },
+        status,  // received, rejected, simulated, executed, failed, error, emergency_stop
+        reason,
+        result: result ? {
+          orderId: result.orderId,
+          size: result.size,
+          price: result.price,
+          side: result.side
+        } : null,
+        tradingState: {
+          dailyTradeCount: this.tradingState.dailyTradeCount,
+          dailyPnL: this.tradingState.dailyPnL,
+          tradingHalted: this.tradingState.tradingHalted
+        },
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: new Date().toISOString()
+      };
+
+      await this.db.collection('tradeHistory').add(logEntry);
+      console.log(`📝 Trade logged: ${status}`);
+    } catch (error) {
+      console.error('Error logging trade:', error.message);
+    }
+  }
+
+  // =========================================================================
+  // STOP DECISION LISTENER
+  // =========================================================================
+  stopDecisionListener() {
+    if (this.decisionUnsubscribe) {
+      this.decisionUnsubscribe();
+      this.decisionUnsubscribe = null;
+      console.log('🛑 Decision listener stopped');
+    }
   }
 
   validateConfiguration() {
@@ -469,7 +901,18 @@ class LighterStandaloneService {
     this.startTechnicalDataUpdates(); // Add OHLC technical data for TeknoScreen
     this.startHealthCheck();
 
-    console.log('✅ Service started in standalone mode');
+    // Start RL80 decision listener for trade execution
+    this.startDecisionListener();
+
+    console.log('');
+    console.log('═'.repeat(60));
+    console.log('✅ LIGHTER SERVICE STARTED');
+    console.log('═'.repeat(60));
+    console.log('📊 Data Collection: ACTIVE');
+    console.log(`💰 Trade Execution: ${this.tradingConfig.enabled ? 'ENABLED' : 'DISABLED (simulation mode)'}`);
+    console.log('👂 RL80 Decision Listener: ACTIVE');
+    console.log('═'.repeat(60));
+    console.log('');
     await this.updateServiceStatus('running');
 
     // Handle graceful shutdown
@@ -1691,6 +2134,9 @@ class LighterStandaloneService {
   async shutdown() {
     console.log('🛑 Shutting down Lighter Standalone Service...');
     this.isRunning = false;
+
+    // Stop the decision listener
+    this.stopDecisionListener();
 
     await this.updateServiceStatus('stopped');
     console.log('✅ Service stopped gracefully');
