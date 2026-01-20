@@ -904,6 +904,7 @@ class LighterStandaloneService {
     this.startLighterDataUpdates(); // Add Lighter trading data
     this.startSentimentDataUpdates(); // Add sentiment/trending data
     this.startTechnicalDataUpdates(); // Add OHLC technical data for TeknoScreen
+    this.startMacroDataUpdates(); // Add real macro data for MacroScreen
     this.startHealthCheck();
 
     // Start RL80 decision listener for trade execution
@@ -959,7 +960,8 @@ class LighterStandaloneService {
   }
 
   startAgentContextUpdates() {
-    // Update agent context every 120 seconds
+    // Update agent context every 120 seconds (Fear & Greed, sentiment, trend)
+    // Note: VIX, funding rate, and DXY are now fetched from real sources in startMacroDataUpdates
     setInterval(async () => {
       if (!this.isRunning) return;
 
@@ -971,15 +973,9 @@ class LighterStandaloneService {
 
         const fearGreedValue = fearGreedResponse.data?.data?.[0]?.value || 50;
 
-        // Calculate mock funding rate and other indicators
-        const fundingRate = (Math.random() - 0.5) * 0.02; // -1% to +1%
-        const vix = 15 + Math.random() * 20; // 15-35 range
-
         const agentContext = {
           fearGreed: parseInt(fearGreedValue),
-          fundingRate: fundingRate,
-          vix: vix,
-          marketSentiment: fearGreedValue > 75 ? 'extreme_greed' : 
+          marketSentiment: fearGreedValue > 75 ? 'extreme_greed' :
                           fearGreedValue > 55 ? 'greed' :
                           fearGreedValue > 45 ? 'neutral' :
                           fearGreedValue > 25 ? 'fear' : 'extreme_fear',
@@ -989,7 +985,7 @@ class LighterStandaloneService {
         };
 
         await this.db.collection('agentContext').doc('market').set(agentContext, { merge: true });
-        console.log(`🤖 Agent context updated: F&G=${fearGreedValue}, Funding=${(fundingRate*100).toFixed(3)}%`);
+        console.log(`🤖 Agent context updated: F&G=${fearGreedValue}, Sentiment=${agentContext.marketSentiment}`);
 
       } catch (error) {
         console.error('❌ Error updating agent context:', error.message);
@@ -1032,9 +1028,9 @@ class LighterStandaloneService {
     updateSentiment();
 
     // Then every 30 minutes
-    setInterval(updateSentiment, 1800000); // 30 minutes
+    setInterval(updateSentiment, 43200000); // 12 hours (twice daily)
 
-    console.log('🎭 Started sentiment data updates (30min interval)');
+    console.log('🎭 Started sentiment data updates (12hr interval)');
   }
 
   async fetchSentimentData() {
@@ -1679,6 +1675,257 @@ class LighterStandaloneService {
       console.log(`📊 Technical data saved: ${Object.keys(data).join(', ')}`);
     } catch (error) {
       console.error('❌ Error saving technical data:', error.message);
+    }
+  }
+
+  // ============================================================================
+  // MACRO DATA UPDATES (VIX, DXY, SPX, Treasury, Funding, OI)
+  // ============================================================================
+
+  startMacroDataUpdates() {
+    // Update macro data every 5 minutes (Yahoo Finance is free, Lighter has rate limits)
+    const updateMacroData = async () => {
+      if (!this.isRunning) return;
+
+      try {
+        console.log('🌍 Fetching macro data (VIX, DXY, SPX, Treasury, Funding, OI)...');
+
+        // Fetch all data in parallel
+        const [yahooData, treasuryData, fundingData, oiData] = await Promise.allSettled([
+          this.fetchYahooMacroData(),
+          this.fetchTreasuryYield(),
+          this.fetchLighterFundingRates(),
+          this.fetchLighterOpenInterest()
+        ]);
+
+        const macroData = {
+          vix: this.extractResult(yahooData, {}).vix || { value: 18.5, change: 0, changePercent: 0 },
+          dxy: this.extractResult(yahooData, {}).dxy || { value: 99, change: 0, changePercent: 0 },
+          spx: this.extractResult(yahooData, {}).spx || { value: 585, change: 0, changePercent: 0 },
+          treasury10y: this.extractResult(treasuryData, { value: 4.5, change: 0 }),
+          funding: this.extractResult(fundingData, { btc: 0, eth: 0 }),
+          openInterest: this.extractResult(oiData, { btc: 0, eth: 0, total: 0 }),
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          lastUpdate: new Date().toISOString(),
+          source: 'yahoo/lighter'
+        };
+
+        await this.saveMacroData(macroData);
+        console.log(`🌍 Macro data updated: VIX=${macroData.vix.value}, DXY=${macroData.dxy.value}, SPX=${macroData.spx.value}`);
+
+      } catch (error) {
+        console.error('❌ Error fetching macro data:', error.message);
+      }
+    };
+
+    // Run immediately on start
+    updateMacroData();
+
+    // Then every 4 hours (14400000ms) - traditional market data changes slowly
+    setInterval(updateMacroData, 14400000);
+
+    console.log('🌍 Started macro data updates (4hr interval)');
+  }
+
+  // Fetch VIX, DXY, SPX from Yahoo Finance
+  async fetchYahooMacroData() {
+    const results = { vix: null, dxy: null, spx: null };
+
+    // Fetch VIX (^VIX)
+    try {
+      const vixResponse = await axios.get(
+        'https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=1d',
+        {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000
+        }
+      );
+      const vixQuote = vixResponse.data?.chart?.result?.[0]?.meta;
+      if (vixQuote) {
+        const currentPrice = vixQuote.regularMarketPrice || 0;
+        const previousClose = vixQuote.previousClose || currentPrice;
+        const change = currentPrice - previousClose;
+        results.vix = {
+          value: parseFloat(currentPrice.toFixed(2)),
+          change: parseFloat(change.toFixed(2)),
+          changePercent: previousClose ? parseFloat(((change / previousClose) * 100).toFixed(2)) : 0
+        };
+      }
+    } catch (err) {
+      console.log('⚠️ Yahoo VIX fetch error:', err.message);
+    }
+
+    // Fetch DXY (DX-Y.NYB)
+    try {
+      const dxyResponse = await axios.get(
+        'https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=1d',
+        {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000
+        }
+      );
+      const dxyQuote = dxyResponse.data?.chart?.result?.[0]?.meta;
+      if (dxyQuote) {
+        const currentPrice = dxyQuote.regularMarketPrice || 0;
+        const previousClose = dxyQuote.previousClose || currentPrice;
+        const change = currentPrice - previousClose;
+        results.dxy = {
+          value: parseFloat(currentPrice.toFixed(2)),
+          change: parseFloat(change.toFixed(2)),
+          changePercent: previousClose ? parseFloat(((change / previousClose) * 100).toFixed(2)) : 0
+        };
+      }
+    } catch (err) {
+      console.log('⚠️ Yahoo DXY fetch error:', err.message);
+    }
+
+    // Fetch SPY (for SPX proxy)
+    try {
+      const spyResponse = await axios.get(
+        'https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=1d',
+        {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000
+        }
+      );
+      const spyQuote = spyResponse.data?.chart?.result?.[0]?.meta;
+      if (spyQuote) {
+        const currentPrice = spyQuote.regularMarketPrice || 0;
+        const previousClose = spyQuote.previousClose || currentPrice;
+        const change = currentPrice - previousClose;
+        results.spx = {
+          value: parseFloat(currentPrice.toFixed(2)),
+          change: parseFloat(change.toFixed(2)),
+          changePercent: previousClose ? parseFloat(((change / previousClose) * 100).toFixed(2)) : 0
+        };
+      }
+    } catch (err) {
+      console.log('⚠️ Yahoo SPY fetch error:', err.message);
+    }
+
+    return results;
+  }
+
+  // Fetch 10Y Treasury yield from Yahoo Finance (^TNX)
+  async fetchTreasuryYield() {
+    try {
+      const response = await axios.get(
+        'https://query1.finance.yahoo.com/v8/finance/chart/%5ETNX?interval=1d&range=2d',
+        {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000
+        }
+      );
+      const quote = response.data?.chart?.result?.[0]?.meta;
+      if (quote) {
+        const currentYield = quote.regularMarketPrice || 0;
+        const previousClose = quote.previousClose || currentYield;
+        const change = currentYield - previousClose;
+        return {
+          value: parseFloat(currentYield.toFixed(3)),
+          change: parseFloat(change.toFixed(3)),
+          previousValue: parseFloat(previousClose.toFixed(3))
+        };
+      }
+    } catch (err) {
+      console.log('⚠️ Yahoo Treasury fetch error:', err.message);
+    }
+    return { value: 4.5, change: 0 };
+  }
+
+  // Fetch funding rates from Lighter DEX
+  async fetchLighterFundingRates() {
+    const baseUrl = this.lighterConfig.baseUrl;
+    if (!baseUrl) {
+      return { btc: 0, eth: 0 };
+    }
+
+    try {
+      const response = await axios.get(`${baseUrl}/api/v1/funding-rates`, {
+        headers: { 'Accept': 'application/json' },
+        timeout: 10000
+      });
+
+      const rates = { btc: 0, eth: 0 };
+      if (response.data?.funding_rates && Array.isArray(response.data.funding_rates)) {
+        response.data.funding_rates
+          .filter(item => item.exchange === 'lighter')
+          .forEach(item => {
+            const symbol = (item.symbol || '').toUpperCase();
+            const rate = parseFloat(item.rate || 0);
+            if (symbol === 'BTC') rates.btc = rate;
+            else if (symbol === 'ETH') rates.eth = rate;
+          });
+      }
+      return rates;
+    } catch (err) {
+      console.log('⚠️ Lighter funding rates fetch error:', err.message);
+      return { btc: 0, eth: 0 };
+    }
+  }
+
+  // Fetch Open Interest from Lighter DEX
+  async fetchLighterOpenInterest() {
+    const baseUrl = this.lighterConfig.baseUrl;
+    if (!baseUrl) {
+      return { btc: 0, eth: 0, total: 0 };
+    }
+
+    try {
+      const response = await axios.get(`${baseUrl}/api/v1/orderBookDetails?market=BTC`, {
+        headers: { 'Accept': 'application/json' },
+        timeout: 10000
+      });
+
+      const oi = { btc: 0, eth: 0, total: 0 };
+      if (response.data?.order_book_details && Array.isArray(response.data.order_book_details)) {
+        response.data.order_book_details.forEach(market => {
+          const symbol = (market.symbol || '').toUpperCase();
+          const openInterestNative = parseFloat(market.open_interest || 0);
+          const price = parseFloat(market.last_trade_price || 0);
+          const openInterestUSD = openInterestNative * price;
+
+          if (symbol === 'BTC') oi.btc = openInterestUSD;
+          else if (symbol === 'ETH') oi.eth = openInterestUSD;
+        });
+        oi.total = oi.btc + oi.eth;
+      }
+      return oi;
+    } catch (err) {
+      console.log('⚠️ Lighter open interest fetch error:', err.message);
+      return { btc: 0, eth: 0, total: 0 };
+    }
+  }
+
+  // Helper to extract result from Promise.allSettled
+  extractResult(settledResult, fallback) {
+    if (settledResult.status === 'fulfilled') {
+      return settledResult.value;
+    }
+    console.log('⚠️ Macro fetch failed:', settledResult.reason?.message || 'Unknown error');
+    return fallback;
+  }
+
+  // Save macro data to Firestore
+  async saveMacroData(data) {
+    if (!this.db) {
+      console.log('⚠️ Skipping macro data save - Firebase not available');
+      return;
+    }
+
+    try {
+      await this.db.collection('macroData').doc('latest').set(data);
+
+      // Also update agentContext with real VIX and funding rate for agents
+      await this.db.collection('agentContext').doc('market').set({
+        vix: data.vix.value,
+        fundingRate: data.funding.btc,
+        dxy: data.dxy.value,
+        lastMacroUpdate: data.lastUpdate
+      }, { merge: true });
+
+    } catch (error) {
+      console.error('❌ Error saving macro data:', error.message);
     }
   }
 
