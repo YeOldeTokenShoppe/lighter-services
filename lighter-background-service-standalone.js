@@ -21,7 +21,7 @@ const appStore = require('app-store-scraper');
 class RateLimiter {
   constructor() {
     this.lastCall = 0;
-    this.minInterval = 6000; // 6 seconds between API calls (CoinGecko free tier: 10-50/min)
+    this.minInterval = 8000; // 8 seconds between API calls (CoinGecko free tier is very strict)
   }
   
   async throttle() {
@@ -928,36 +928,110 @@ class LighterStandaloneService {
   }
 
   startMarketDataUpdates() {
-    // Fetch real market data every 3 minutes (reduced to avoid CoinGecko rate limits)
-    setInterval(async () => {
+    // Single batched CoinGecko call every 5 minutes
+    // Uses /coins/markets which returns prices, changes, and sparkline for multiple coins
+    const updateMarketData = async () => {
       if (!this.isRunning) return;
 
       try {
-        // Fetch real BTC price from CoinGecko
-        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true', {
-          timeout: 10000
-        });
+        // Batched call: gets price, 24h change, high/low, volume, and 7-day sparkline for all coins
+        const response = await axios.get(
+          'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=bitcoin,ethereum,solana,ripple&order=market_cap_desc&sparkline=true&price_change_percentage=24h',
+          { timeout: 15000 }
+        );
 
-        if (response.data) {
+        if (response.data && response.data.length > 0) {
+          const coins = {};
+          response.data.forEach(coin => {
+            coins[coin.symbol.toUpperCase()] = {
+              price: coin.current_price,
+              change24h: coin.price_change_percentage_24h || 0,
+              high24h: coin.high_24h,
+              low24h: coin.low_24h,
+              volume: coin.total_volume,
+              marketCap: coin.market_cap,
+              sparkline: coin.sparkline_in_7d?.price || [] // 7-day price history for charts
+            };
+          });
+
           const marketData = {
-            btcPrice: response.data.bitcoin.usd,
-            ethPrice: response.data.ethereum.usd,
-            btcChange24h: response.data.bitcoin.usd_24h_change || 0,
-            ethChange24h: response.data.ethereum.usd_24h_change || 0,
+            btcPrice: coins.BTC?.price || 0,
+            ethPrice: coins.ETH?.price || 0,
+            solPrice: coins.SOL?.price || 0,
+            xrpPrice: coins.XRP?.price || 0,
+            btcChange24h: coins.BTC?.change24h || 0,
+            ethChange24h: coins.ETH?.change24h || 0,
+            coins, // Full data for all coins
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
             lastUpdate: new Date().toISOString()
           };
 
           await this.saveMarketData(marketData);
-          console.log(`📊 Market updated: BTC $${marketData.btcPrice.toFixed(0)}, ETH $${marketData.ethPrice.toFixed(0)}`);
+
+          // Also save sparkline data for TeknoScreen charts
+          await this.saveSparklineData(coins);
+
+          console.log(`📊 Market updated: BTC $${marketData.btcPrice.toFixed(0)}, ETH $${marketData.ethPrice.toFixed(0)}, SOL $${(marketData.solPrice || 0).toFixed(0)}`);
         }
 
       } catch (error) {
         console.error('❌ Error fetching market data:', error.message);
       }
-    }, 180000);
+    };
 
-    console.log('📈 Started market data updates (3min interval)');
+    // Run immediately, then every 5 minutes
+    updateMarketData();
+    setInterval(updateMarketData, 300000);
+
+    console.log('📈 Started market data updates (5min interval, single batched call)');
+  }
+
+  async saveSparklineData(coins) {
+    if (!this.db) return;
+
+    try {
+      // Convert sparkline to OHLC-like format for TeknoScreen compatibility
+      const technicalData = {};
+
+      for (const [symbol, data] of Object.entries(coins)) {
+        if (data.sparkline && data.sparkline.length > 0) {
+          // Sparkline is hourly prices for 7 days (~168 points)
+          // Convert to simple candle format for charts
+          const candles = [];
+          const prices = data.sparkline;
+          const interval = Math.floor(prices.length / 42); // ~42 candles like OHLC
+
+          for (let i = 0; i < prices.length; i += interval) {
+            const slice = prices.slice(i, i + interval);
+            if (slice.length > 0) {
+              candles.push({
+                open: slice[0],
+                high: Math.max(...slice),
+                low: Math.min(...slice),
+                close: slice[slice.length - 1]
+              });
+            }
+          }
+
+          technicalData[symbol] = {
+            candles: candles.slice(-42), // Last 42 candles
+            currentPrice: data.price,
+            high24h: data.high24h,
+            low24h: data.low24h,
+            change24h: data.change24h
+          };
+        }
+      }
+
+      await this.db.collection('technicalData').doc('latest').set({
+        ...technicalData,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        lastUpdate: new Date().toISOString()
+      });
+
+    } catch (error) {
+      console.error('❌ Error saving sparkline data:', error.message);
+    }
   }
 
   startAgentContextUpdates() {
@@ -1411,17 +1485,18 @@ class LighterStandaloneService {
       }
     };
 
-    // Run immediately on start
-    updateTechnicalData();
+    // DISABLED: OHLC fetching uses too many CoinGecko API calls
+    // Market data updates provide sufficient price data
+    // Uncomment below to re-enable if you upgrade to CoinGecko paid tier
+    // setTimeout(updateTechnicalData, 60000);
+    // setInterval(updateTechnicalData, 300000);
 
-    // Then every 5 minutes (300s) to reduce CoinGecko rate limit hits
-    setInterval(updateTechnicalData, 300000);
-
-    console.log('📊 Started technical data updates (5min interval)');
+    console.log('📊 Technical data updates DISABLED (CoinGecko rate limits)');
   }
 
   async fetchOHLCData() {
-    const symbols = ['BTC', 'ETH', 'SOL', 'XRP'];
+    // Reduced to BTC/ETH only to minimize CoinGecko API calls (free tier is strict)
+    const symbols = ['BTC', 'ETH'];
     const symbolMap = {
       'BTC': 'bitcoin',
       'ETH': 'ethereum',
