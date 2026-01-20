@@ -21,7 +21,7 @@ const appStore = require('app-store-scraper');
 class RateLimiter {
   constructor() {
     this.lastCall = 0;
-    this.minInterval = 2000; // 2 seconds between API calls
+    this.minInterval = 4000; // 4 seconds between API calls (CoinGecko free tier is strict)
   }
   
   async throttle() {
@@ -1413,10 +1413,10 @@ class LighterStandaloneService {
     // Run immediately on start
     updateTechnicalData();
 
-    // Then every 60 seconds
-    setInterval(updateTechnicalData, 60000);
+    // Then every 2 minutes (reduced from 60s to avoid CoinGecko rate limits)
+    setInterval(updateTechnicalData, 120000);
 
-    console.log('📊 Started technical data updates (60s interval)');
+    console.log('📊 Started technical data updates (120s interval)');
   }
 
   async fetchOHLCData() {
@@ -1698,20 +1698,21 @@ class LighterStandaloneService {
           this.fetchLighterOpenInterest()
         ]);
 
+        const yahooResults = this.extractResult(yahooData, {});
         const macroData = {
-          vix: this.extractResult(yahooData, {}).vix || { value: 18.5, change: 0, changePercent: 0 },
-          dxy: this.extractResult(yahooData, {}).dxy || { value: 99, change: 0, changePercent: 0 },
-          spx: this.extractResult(yahooData, {}).spx || { value: 585, change: 0, changePercent: 0 },
-          treasury10y: this.extractResult(treasuryData, { value: 4.5, change: 0 }),
-          funding: this.extractResult(fundingData, { btc: 0, eth: 0 }),
-          openInterest: this.extractResult(oiData, { btc: 0, eth: 0, total: 0 }),
+          vix: yahooResults.vix || null,  // No fallback - show N/A if fetch fails
+          dxy: yahooResults.dxy || null,  // No fallback - show N/A if fetch fails
+          spx: yahooResults.spx || null,  // No fallback - show N/A if fetch fails
+          treasury10y: this.extractResult(treasuryData, null),
+          funding: this.extractResult(fundingData, { btc: null, eth: null }),
+          openInterest: this.extractResult(oiData, { btc: null, eth: null, total: null }),
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           lastUpdate: new Date().toISOString(),
           source: 'yahoo/lighter'
         };
 
         await this.saveMacroData(macroData);
-        console.log(`🌍 Macro data updated: VIX=${macroData.vix.value}, DXY=${macroData.dxy.value}, SPX=${macroData.spx.value}`);
+        console.log(`🌍 Macro data updated: VIX=${macroData.vix?.value ?? 'N/A'}, DXY=${macroData.dxy?.value ?? 'N/A'}, SPX=${macroData.spx?.value ?? 'N/A'}`);
 
       } catch (error) {
         console.error('❌ Error fetching macro data:', error.message);
@@ -1721,10 +1722,10 @@ class LighterStandaloneService {
     // Run immediately on start
     updateMacroData();
 
-    // Then every 4 hours (14400000ms) - traditional market data changes slowly
-    setInterval(updateMacroData, 14400000);
+    // Then every 1 hour (3600000ms)
+    setInterval(updateMacroData, 3600000);
 
-    console.log('🌍 Started macro data updates (4hr interval)');
+    console.log('🌍 Started macro data updates (1hr interval)');
   }
 
   // Fetch VIX, DXY, SPX from Yahoo Finance
@@ -1755,15 +1756,22 @@ class LighterStandaloneService {
       console.log('⚠️ Yahoo VIX fetch error:', err.message);
     }
 
-    // Fetch DXY (DX-Y.NYB)
+    // Fetch DXY (DX-Y.NYB) - US Dollar Index
     try {
       const dxyResponse = await axios.get(
         'https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=1d',
         {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
           timeout: 10000
         }
       );
+
+      // Check for Yahoo Finance API errors
+      const chartError = dxyResponse.data?.chart?.error;
+      if (chartError) {
+        console.log('⚠️ Yahoo DXY API error:', chartError.code, chartError.description);
+      }
+
       const dxyQuote = dxyResponse.data?.chart?.result?.[0]?.meta;
       if (dxyQuote) {
         const currentPrice = dxyQuote.regularMarketPrice || 0;
@@ -1774,9 +1782,15 @@ class LighterStandaloneService {
           change: parseFloat(change.toFixed(2)),
           changePercent: previousClose ? parseFloat(((change / previousClose) * 100).toFixed(2)) : 0
         };
+        console.log(`✅ DXY fetched: ${results.dxy.value}`);
+      } else {
+        console.log('⚠️ Yahoo DXY: No quote data in response. Response keys:', Object.keys(dxyResponse.data || {}));
       }
     } catch (err) {
       console.log('⚠️ Yahoo DXY fetch error:', err.message);
+      if (err.response) {
+        console.log('   Status:', err.response.status, '| Data:', JSON.stringify(err.response.data).slice(0, 200));
+      }
     }
 
     // Fetch SPY (for SPX proxy)
