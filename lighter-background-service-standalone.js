@@ -21,7 +21,7 @@ const appStore = require('app-store-scraper');
 class RateLimiter {
   constructor() {
     this.lastCall = 0;
-    this.minInterval = 4000; // 4 seconds between API calls (CoinGecko free tier is strict)
+    this.minInterval = 6000; // 6 seconds between API calls (CoinGecko free tier: 10-50/min)
   }
   
   async throttle() {
@@ -905,6 +905,7 @@ class LighterStandaloneService {
     this.startSentimentDataUpdates(); // Add sentiment/trending data
     this.startTechnicalDataUpdates(); // Add OHLC technical data for TeknoScreen
     this.startMacroDataUpdates(); // Add real macro data for MacroScreen
+    this.startNewsDataUpdates(); // Add crypto news from CryptoPanic + RSS
     this.startHealthCheck();
 
     // Start RL80 decision listener for trade execution
@@ -927,10 +928,10 @@ class LighterStandaloneService {
   }
 
   startMarketDataUpdates() {
-    // Fetch real market data every 60 seconds
+    // Fetch real market data every 3 minutes (reduced to avoid CoinGecko rate limits)
     setInterval(async () => {
       if (!this.isRunning) return;
-      
+
       try {
         // Fetch real BTC price from CoinGecko
         const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true', {
@@ -954,9 +955,9 @@ class LighterStandaloneService {
       } catch (error) {
         console.error('❌ Error fetching market data:', error.message);
       }
-    }, 60000);
+    }, 180000);
 
-    console.log('📈 Started market data updates (60s interval)');
+    console.log('📈 Started market data updates (3min interval)');
   }
 
   startAgentContextUpdates() {
@@ -1413,10 +1414,10 @@ class LighterStandaloneService {
     // Run immediately on start
     updateTechnicalData();
 
-    // Then every 2 minutes (reduced from 60s to avoid CoinGecko rate limits)
-    setInterval(updateTechnicalData, 120000);
+    // Then every 5 minutes (300s) to reduce CoinGecko rate limit hits
+    setInterval(updateTechnicalData, 300000);
 
-    console.log('📊 Started technical data updates (120s interval)');
+    console.log('📊 Started technical data updates (5min interval)');
   }
 
   async fetchOHLCData() {
@@ -1753,7 +1754,10 @@ class LighterStandaloneService {
         };
       }
     } catch (err) {
-      console.log('⚠️ Yahoo VIX fetch error:', err.message);
+      console.log('⚠️ Yahoo VIX fetch error:', err.message || err.code || 'Unknown error');
+      if (err.response) {
+        console.log('   Status:', err.response.status, '| Code:', err.response.data?.chart?.error?.code);
+      }
     }
 
     // Fetch DXY (DX-Y.NYB) - US Dollar Index
@@ -1814,7 +1818,10 @@ class LighterStandaloneService {
         };
       }
     } catch (err) {
-      console.log('⚠️ Yahoo SPY fetch error:', err.message);
+      console.log('⚠️ Yahoo SPY fetch error:', err.message || err.code || 'Unknown error');
+      if (err.response) {
+        console.log('   Status:', err.response.status);
+      }
     }
 
     return results;
@@ -1931,15 +1938,265 @@ class LighterStandaloneService {
       await this.db.collection('macroData').doc('latest').set(data);
 
       // Also update agentContext with real VIX and funding rate for agents
+      // Use null-safe access since macro fetches may fail
       await this.db.collection('agentContext').doc('market').set({
-        vix: data.vix.value,
-        fundingRate: data.funding.btc,
-        dxy: data.dxy.value,
+        vix: data.vix?.value ?? null,
+        fundingRate: data.funding?.btc ?? null,
+        dxy: data.dxy?.value ?? null,
         lastMacroUpdate: data.lastUpdate
       }, { merge: true });
 
     } catch (error) {
       console.error('❌ Error saving macro data:', error.message);
+    }
+  }
+
+  // ============================================================================
+  // NEWS DATA UPDATES (CryptoPanic + RSS Feeds)
+  // ============================================================================
+
+  startNewsDataUpdates() {
+    const updateNewsData = async () => {
+      if (!this.isRunning) return;
+
+      try {
+        console.log('📰 Fetching crypto news data...');
+
+        // Fetch from multiple sources in parallel
+        const [cryptoPanicNews, rssNews] = await Promise.allSettled([
+          this.fetchCryptoPanicNews(),
+          this.fetchRSSNews()
+        ]);
+
+        const cpNews = this.extractResult(cryptoPanicNews, { headlines: [], sentiment: null });
+        const rss = this.extractResult(rssNews, { headlines: [] });
+
+        // Combine and deduplicate headlines
+        const allHeadlines = [...(cpNews.headlines || []), ...(rss.headlines || [])];
+        const uniqueHeadlines = this.deduplicateHeadlines(allHeadlines);
+
+        // Calculate aggregate sentiment
+        const sentimentCounts = { bullish: 0, bearish: 0, neutral: 0 };
+        uniqueHeadlines.forEach(h => {
+          if (h.sentiment === 'bullish') sentimentCounts.bullish++;
+          else if (h.sentiment === 'bearish') sentimentCounts.bearish++;
+          else sentimentCounts.neutral++;
+        });
+
+        const newsData = {
+          headlines: uniqueHeadlines.slice(0, 20), // Keep top 20
+          sentiment: sentimentCounts,
+          sentimentScore: this.calculateNewsSentimentScore(sentimentCounts),
+          topStories: uniqueHeadlines.filter(h => h.isHot).slice(0, 5),
+          sources: {
+            cryptoPanic: cpNews.headlines?.length || 0,
+            rss: rss.headlines?.length || 0
+          },
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          lastUpdate: new Date().toISOString()
+        };
+
+        await this.saveNewsData(newsData);
+        console.log(`📰 News data updated: ${uniqueHeadlines.length} headlines, sentiment: ${newsData.sentimentScore > 0 ? '+' : ''}${newsData.sentimentScore.toFixed(2)}`);
+
+      } catch (error) {
+        console.error('❌ Error fetching news data:', error.message);
+      }
+    };
+
+    // Run immediately on start
+    updateNewsData();
+
+    // Then every 30 minutes (news doesn't need to be real-time)
+    setInterval(updateNewsData, 1800000);
+
+    console.log('📰 Started news data updates (30min interval)');
+  }
+
+  // Fetch news from CryptoPanic API v2 (Developer tier)
+  async fetchCryptoPanicNews() {
+    const apiKey = process.env.CRYPTOPANIC_API_KEY;
+
+    // If no API key, return empty (will fall back to RSS)
+    if (!apiKey) {
+      console.log('⚠️ CRYPTOPANIC_API_KEY not configured, using RSS feeds only');
+      return { headlines: [], sentiment: null };
+    }
+
+    try {
+      await this.rateLimiter.throttle();
+
+      // Using v2 API with public=true for non-personalized news (suitable for apps)
+      const response = await axios.get(
+        `https://cryptopanic.com/api/developer/v2/posts/?auth_token=${apiKey}&public=true&currencies=BTC,ETH,SOL,XRP`,
+        { timeout: 15000 }
+      );
+
+      const results = response.data?.results || [];
+
+      const headlines = results.map(item => ({
+        title: item.title,
+        source: item.source?.title || 'Unknown',
+        url: item.url,
+        sentiment: this.mapCryptoPanicSentiment(item.votes),
+        publishedAt: item.published_at,
+        isHot: item.kind === 'news' && (item.votes?.positive || 0) > 5,
+        votes: {
+          positive: item.votes?.positive || 0,
+          negative: item.votes?.negative || 0,
+          important: item.votes?.important || 0
+        }
+      }));
+
+      console.log(`✅ CryptoPanic: fetched ${headlines.length} headlines`);
+      return { headlines, sentiment: response.data?.info?.sentiment || null };
+
+    } catch (err) {
+      console.log('⚠️ CryptoPanic fetch error:', err.message);
+      if (err.response?.status === 429) {
+        console.log('   Rate limited - will retry next cycle');
+      }
+      return { headlines: [], sentiment: null };
+    }
+  }
+
+  // Map CryptoPanic votes to sentiment
+  mapCryptoPanicSentiment(votes) {
+    if (!votes) return 'neutral';
+    const positive = votes.positive || 0;
+    const negative = votes.negative || 0;
+
+    if (positive > negative * 2) return 'bullish';
+    if (negative > positive * 2) return 'bearish';
+    return 'neutral';
+  }
+
+  // Fetch news from RSS feeds (free, no auth required)
+  async fetchRSSNews() {
+    const feeds = [
+      { url: 'https://cointelegraph.com/rss', source: 'CoinTelegraph' },
+      { url: 'https://decrypt.co/feed', source: 'Decrypt' },
+      { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'CoinDesk' }
+    ];
+
+    const allHeadlines = [];
+
+    for (const feed of feeds) {
+      try {
+        await this.rateLimiter.throttle();
+
+        const response = await axios.get(feed.url, {
+          timeout: 10000,
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CryptoNewsBot/1.0)' }
+        });
+
+        // Simple XML parsing for RSS (extract titles between <title> tags)
+        const titles = this.parseRSSItems(response.data, feed.source);
+        allHeadlines.push(...titles);
+
+        console.log(`✅ RSS ${feed.source}: fetched ${titles.length} headlines`);
+
+      } catch (err) {
+        console.log(`⚠️ RSS ${feed.source} fetch error:`, err.message);
+      }
+    }
+
+    return { headlines: allHeadlines };
+  }
+
+  // Simple RSS parser (extracts items without heavy dependencies)
+  parseRSSItems(xml, source) {
+    const items = [];
+    const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+    const titleRegex = /<title><!\[CDATA\[(.*?)\]\]><\/title>|<title>(.*?)<\/title>/i;
+    const linkRegex = /<link>(.*?)<\/link>/i;
+    const pubDateRegex = /<pubDate>(.*?)<\/pubDate>/i;
+
+    let match;
+    while ((match = itemRegex.exec(xml)) !== null && items.length < 10) {
+      const itemXml = match[1];
+
+      const titleMatch = titleRegex.exec(itemXml);
+      const linkMatch = linkRegex.exec(itemXml);
+      const dateMatch = pubDateRegex.exec(itemXml);
+
+      if (titleMatch) {
+        const title = (titleMatch[1] || titleMatch[2] || '').trim();
+
+        // Skip if title looks like a category or is too short
+        if (title.length < 20) continue;
+
+        items.push({
+          title,
+          source,
+          url: linkMatch ? linkMatch[1] : null,
+          sentiment: this.analyzeHeadlineSentiment(title),
+          publishedAt: dateMatch ? dateMatch[1] : null,
+          isHot: false
+        });
+      }
+    }
+
+    return items;
+  }
+
+  // Simple keyword-based sentiment analysis for headlines
+  analyzeHeadlineSentiment(title) {
+    const lower = title.toLowerCase();
+
+    const bullishWords = ['surge', 'soar', 'rally', 'bullish', 'gain', 'rise', 'jump', 'breakout',
+                          'all-time high', 'ath', 'moon', 'pump', 'adoption', 'approval', 'etf approved'];
+    const bearishWords = ['crash', 'plunge', 'dump', 'bearish', 'drop', 'fall', 'decline', 'fear',
+                          'hack', 'exploit', 'scam', 'fraud', 'sec', 'lawsuit', 'ban', 'warning'];
+
+    const bullishScore = bullishWords.filter(w => lower.includes(w)).length;
+    const bearishScore = bearishWords.filter(w => lower.includes(w)).length;
+
+    if (bullishScore > bearishScore) return 'bullish';
+    if (bearishScore > bullishScore) return 'bearish';
+    return 'neutral';
+  }
+
+  // Deduplicate headlines by similarity
+  deduplicateHeadlines(headlines) {
+    const seen = new Set();
+    return headlines.filter(h => {
+      // Create a simple fingerprint from first 50 chars
+      const fingerprint = h.title.toLowerCase().substring(0, 50).replace(/[^a-z0-9]/g, '');
+      if (seen.has(fingerprint)) return false;
+      seen.add(fingerprint);
+      return true;
+    });
+  }
+
+  // Calculate overall sentiment score (-1 to +1)
+  calculateNewsSentimentScore(counts) {
+    const total = counts.bullish + counts.bearish + counts.neutral;
+    if (total === 0) return 0;
+
+    // Weighted score: bullish = +1, bearish = -1, neutral = 0
+    return (counts.bullish - counts.bearish) / total;
+  }
+
+  // Save news data to Firestore
+  async saveNewsData(data) {
+    if (!this.db) {
+      console.log('⚠️ Skipping news data save - Firebase not available');
+      return;
+    }
+
+    try {
+      await this.db.collection('newsData').doc('latest').set(data);
+
+      // Also update agentContext with news sentiment for EMO agent
+      await this.db.collection('agentContext').doc('market').set({
+        newsSentiment: data.sentimentScore,
+        newsHeadlineCount: data.headlines?.length || 0,
+        lastNewsUpdate: data.lastUpdate
+      }, { merge: true });
+
+    } catch (error) {
+      console.error('❌ Error saving news data:', error.message);
     }
   }
 
@@ -2004,14 +2261,15 @@ class LighterStandaloneService {
     console.log('🔐 Creating new dual-key authentication token...');
     console.log('🔐 Account Index:', this.lighterConfig.accountIndex);
     console.log('🔐 API Key Index:', this.lighterConfig.apiKeyIndex);
-    
+
     // Following Lighter auth token structure: {expiry_unix}:{account_index}:{api_key_index}:{random_hex}
     const currentTime = Math.floor(Date.now() / 1000);
     const expiry = currentTime + (6 * 60 * 60); // 6 hours (under the 8-hour max)
-    
-    // Generate random hex (32 characters)
-    const randomHex = Math.random().toString(16).slice(2).padEnd(32, '0').slice(0, 32);
-    
+
+    // Generate random hex (32 characters) using crypto for better randomness
+    const crypto = require('crypto');
+    const randomHex = crypto.randomBytes(16).toString('hex'); // 32 hex chars
+
     // Create auth token in the format specified by Lighter docs
     const authToken = `${expiry}:${this.lighterConfig.accountIndex}:${this.lighterConfig.apiKeyIndex}:${randomHex}`;
     
@@ -2194,69 +2452,33 @@ class LighterStandaloneService {
 
   async getLighterAccount() {
     try {
-      console.log(`🔐 Creating Lighter auth token...`);
-      const auth = await this.createLighterAuthToken();
-      
       const url = `${this.lighterConfig.baseUrl}/api/v1/account?by=index&value=${this.lighterConfig.accountIndex}`;
       console.log(`🌐 Fetching Lighter account from: ${url}`);
-      
-      // Build headers based on Lighter authentication requirements
-      const headers = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${auth.authToken}` // Use the auth token as specified in docs
-      };
-      
-      if (auth.keyFormat === 'dual-key') {
-        // Dual-key authentication: API key + signed auth token
-        headers['X-API-Key'] = auth.apiKey.trim().replace(/[\r\n\t]/g, '');
-        headers['X-Signature'] = auth.signature;
-        headers['X-Address'] = auth.address;
-        console.log(`🔑 Using dual-key authentication - API key + signed token (wallet: ${auth.address})`);
-      } else if (auth.signature) {
-        // Legacy wallet-based authentication
-        headers['X-Signature'] = auth.signature;
-        headers['X-Address'] = auth.address;
-        console.log(`🔑 Using legacy signed auth token with wallet: ${auth.address} (${auth.keyFormat} format)`);
-      } else if (auth.apiKey) {
-        // Legacy direct API key authentication
-        headers['X-API-Key'] = auth.apiKey.trim().replace(/[\r\n\t]/g, '');
-        console.log(`🔑 Using legacy direct API key authentication (${auth.keyFormat} format)`);
-      }
-      
-      // Always include these based on the auth token structure
-      headers['X-Account-Index'] = auth.accountIndex;
-      headers['X-API-Key-Index'] = auth.apiKeyIndex;
-      
-      console.log('📋 Request headers:', Object.keys(headers).join(', '));
-      
+
       // Rate limit before API call
       await this.rateLimiter.throttle();
-      
+
+      // Try unauthenticated first - account read may be public per Lighter docs
       const response = await axios.get(url, {
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         timeout: 10000
       });
 
-      console.log(`✅ Lighter account response status: ${response.status}`);
-      console.log(`💰 Account data keys:`, Object.keys(response.data || {}));
-      console.log(`💰 Account data:`, JSON.stringify(response.data, null, 2));
-      
+      console.log(`✅ Lighter account fetched (status: ${response.status})`);
+
       // Check if response.data has balance-related fields
       if (response.data) {
-        console.log(`🔍 Looking for balance fields:`);
-        console.log(`  - balance: ${response.data.balance}`);
-        console.log(`  - equity: ${response.data.equity}`);
-        console.log(`  - totalBalance: ${response.data.totalBalance}`);
-        console.log(`  - accountValue: ${response.data.accountValue}`);
+        const data = response.data;
+        console.log(`💰 Account: balance=${data.balance || data.equity || 'N/A'}`);
       }
-      
+
       return response.data;
     } catch (error) {
-      console.error('❌ Failed to get Lighter account:', error.message);
-      if (error.response) {
-        console.error('❌ Response status:', error.response.status);
-        console.error('❌ Response data:', error.response.data);
-        console.error('❌ Response headers:', error.response.headers);
+      // If unauthenticated fails, log but don't spam - Lighter data is supplementary
+      if (error.response?.status === 401) {
+        console.log('⚠️ Lighter account requires auth - skipping (read-only data not critical)');
+      } else {
+        console.log('⚠️ Lighter account fetch failed:', error.message);
       }
       return null;
     }
@@ -2264,38 +2486,25 @@ class LighterStandaloneService {
 
   async getLighterTradingData() {
     try {
-      const auth = await this.createLighterAuthToken();
-      
-      // Get positions with rate limiting
+      // Try unauthenticated - positions/orders by account index may be public
       await this.rateLimiter.throttle();
-      const positionsResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/positions?by=index&value=${this.lighterConfig.accountIndex}`, {
-          headers: {
-            'Authorization': `Bearer ${auth.signature}`,
-            'X-Timestamp': auth.timestamp,
-            'X-Expiry': auth.expiry,
-            'X-Address': auth.address
-          },
-          timeout: 10000
-        }).catch(() => ({ data: [] }));
-        
-      // Get orders with rate limiting
+      const positionsResponse = await axios.get(
+        `${this.lighterConfig.baseUrl}/api/v1/positions?by=index&value=${this.lighterConfig.accountIndex}`,
+        { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
+      ).catch(() => ({ data: [] }));
+
       await this.rateLimiter.throttle();
-      const ordersResponse = await axios.get(`${this.lighterConfig.baseUrl}/api/v1/orders?by=index&value=${this.lighterConfig.accountIndex}`, {
-        headers: {
-          'Authorization': `Bearer ${auth.signature}`,
-          'X-Timestamp': auth.timestamp,
-          'X-Expiry': auth.expiry,
-          'X-Address': auth.address
-        },
-        timeout: 10000
-      }).catch(() => ({ data: [] }));
+      const ordersResponse = await axios.get(
+        `${this.lighterConfig.baseUrl}/api/v1/orders?by=index&value=${this.lighterConfig.accountIndex}`,
+        { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
+      ).catch(() => ({ data: [] }));
 
       return {
         positions: positionsResponse.data || [],
         orders: ordersResponse.data || []
       };
     } catch (error) {
-      console.error('Failed to get Lighter trading data:', error.message);
+      console.log('⚠️ Lighter trading data fetch failed:', error.message);
       return null;
     }
   }
