@@ -994,14 +994,13 @@ class LighterStandaloneService {
       const technicalData = {};
       const now = Date.now();
 
-      for (const [symbol, data] of Object.entries(coins)) {
-        if (data.sparkline && data.sparkline.length > 0) {
+      for (const [symbol, coinData] of Object.entries(coins)) {
+        if (coinData.sparkline && coinData.sparkline.length > 0) {
           // Sparkline is hourly prices for 7 days (~168 points)
-          // Convert to candle format with proper timestamps for charts
           const candles = [];
-          const prices = data.sparkline;
-          const interval = Math.floor(prices.length / 42); // ~42 candles like OHLC
-          const hoursPerCandle = interval; // Each candle represents this many hours
+          const prices = coinData.sparkline;
+          const interval = Math.floor(prices.length / 42); // ~42 candles
+          const hoursPerCandle = interval;
 
           // Calculate start time (7 days ago)
           const startTime = now - (7 * 24 * 60 * 60 * 1000);
@@ -1010,27 +1009,75 @@ class LighterStandaloneService {
           for (let i = 0; i < prices.length; i += interval) {
             const slice = prices.slice(i, i + interval);
             if (slice.length > 0) {
-              // Calculate timestamp for this candle (Unix timestamp in seconds)
               const candleTime = Math.floor((startTime + (candleIndex * hoursPerCandle * 60 * 60 * 1000)) / 1000);
-
               candles.push({
                 time: candleTime,
                 open: slice[0],
                 high: Math.max(...slice),
                 low: Math.min(...slice),
                 close: slice[slice.length - 1],
-                volume: Math.random() * 1000000 // Placeholder volume since sparkline doesn't include it
+                volume: Math.random() * 1000000
               });
               candleIndex++;
             }
           }
 
+          const finalCandles = candles.slice(-42);
+
+          // Calculate basic indicators from price data
+          const closePrices = finalCandles.map(c => c.close);
+          const currentPrice = coinData.price;
+
+          // Calculate RSI (14 period)
+          const rsi = this.calculateRSI(closePrices, 14);
+
+          // Calculate EMAs
+          const ema12 = this.calculateEMA(closePrices, 12);
+          const ema26 = this.calculateEMA(closePrices, 26);
+
+          // Calculate MACD
+          const macdLine = ema12.length > 0 && ema26.length > 0 ? ema12[ema12.length - 1] - ema26[ema26.length - 1] : 0;
+          const macdSignal = this.calculateEMA([macdLine], 9)[0] || 0;
+
+          // Calculate support/resistance from recent highs/lows
+          const recentCandles = finalCandles.slice(-14);
+          const support = Math.min(...recentCandles.map(c => c.low));
+          const resistance = Math.max(...recentCandles.map(c => c.high));
+
+          // Determine trend
+          const trend = currentPrice > ema12[ema12.length - 1] ? 'bullish' :
+                       currentPrice < ema26[ema26.length - 1] ? 'bearish' : 'sideways';
+
+          // Build EMA indicator arrays with timestamps
+          const ema12Data = finalCandles.map((c, i) => ({ time: c.time, value: ema12[i] || null }));
+          const ema26Data = finalCandles.map((c, i) => ({ time: c.time, value: ema26[i] || null }));
+
+          // Calculate Bollinger Bands (20 period, 2 std dev)
+          const bbPeriod = 20;
+          const bbData = this.calculateBollingerBands(closePrices, bbPeriod);
+
           technicalData[symbol] = {
-            candles: candles.slice(-42), // Last 42 candles
-            currentPrice: data.price,
-            high24h: data.high24h,
-            low24h: data.low24h,
-            change24h: data.change24h
+            candles: finalCandles,
+            current: {
+              price: currentPrice,
+              trend: trend,
+              rsi: rsi,
+              macd: macdLine,
+              macdSignal: macdSignal,
+              macdHistogram: macdLine - macdSignal,
+              support: support,
+              resistance: resistance
+            },
+            indicators: {
+              ema12: ema12Data,
+              ema26: ema26Data,
+              bollingerUpper: finalCandles.map((c, i) => ({ time: c.time, value: bbData.upper[i] || null })),
+              bollingerMiddle: finalCandles.map((c, i) => ({ time: c.time, value: bbData.middle[i] || null })),
+              bollingerLower: finalCandles.map((c, i) => ({ time: c.time, value: bbData.lower[i] || null }))
+            },
+            high24h: coinData.high24h,
+            low24h: coinData.low24h,
+            change24h: coinData.change24h
           };
         }
       }
@@ -1044,6 +1091,65 @@ class LighterStandaloneService {
     } catch (error) {
       console.error('❌ Error saving sparkline data:', error.message);
     }
+  }
+
+  // Calculate RSI
+  calculateRSI(prices, period = 14) {
+    if (prices.length < period + 1) return 50;
+
+    let gains = 0, losses = 0;
+    for (let i = 1; i <= period; i++) {
+      const change = prices[i] - prices[i - 1];
+      if (change > 0) gains += change;
+      else losses -= change;
+    }
+
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    if (avgLoss === 0) return 100;
+
+    const rs = avgGain / avgLoss;
+    return parseFloat((100 - (100 / (1 + rs))).toFixed(1));
+  }
+
+  // Calculate EMA
+  calculateEMA(prices, period) {
+    if (prices.length < period) return prices;
+
+    const k = 2 / (period + 1);
+    const ema = [prices.slice(0, period).reduce((a, b) => a + b, 0) / period];
+
+    for (let i = period; i < prices.length; i++) {
+      ema.push(prices[i] * k + ema[ema.length - 1] * (1 - k));
+    }
+
+    // Pad beginning with nulls to match length
+    const result = new Array(period - 1).fill(null).concat(ema);
+    return result.slice(0, prices.length);
+  }
+
+  // Calculate Bollinger Bands
+  calculateBollingerBands(prices, period = 20, stdDev = 2) {
+    const upper = [], middle = [], lower = [];
+
+    for (let i = 0; i < prices.length; i++) {
+      if (i < period - 1) {
+        upper.push(null);
+        middle.push(null);
+        lower.push(null);
+      } else {
+        const slice = prices.slice(i - period + 1, i + 1);
+        const avg = slice.reduce((a, b) => a + b, 0) / period;
+        const variance = slice.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / period;
+        const std = Math.sqrt(variance);
+
+        middle.push(avg);
+        upper.push(avg + stdDev * std);
+        lower.push(avg - stdDev * std);
+      }
+    }
+
+    return { upper, middle, lower };
   }
 
   startAgentContextUpdates() {
