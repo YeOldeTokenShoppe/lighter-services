@@ -14,8 +14,6 @@ const { Wallet } = require('ethers');
 const fs = require('fs');
 const path = require('path');
 const googleTrends = require('google-trends-api');
-const gplay = require('google-play-scraper');
-const appStore = require('app-store-scraper');
 
 // Rate limiting helper
 class RateLimiter {
@@ -1232,12 +1230,10 @@ class LighterStandaloneService {
       polymarket: null,
       whaleActivity: { activity: 'Unknown', confidence: 0 },
       googleTrends: { btc: null, eth: null },
-      appRankings: { coinbase: null, binance: null, metamask: null },
       dataStatus: {
         trending: 'unavailable',
         whale: 'unavailable',
-        googleTrends: 'unavailable',
-        appRankings: 'unavailable'
+        googleTrends: 'unavailable'
       }
     };
 
@@ -1397,66 +1393,6 @@ class LighterStandaloneService {
       console.log('⚠️ Google Trends fetch failed:', error.message);
     }
 
-    // Fetch App Store Rankings (free scraping)
-    try {
-      console.log('📱 Fetching App Store rankings...');
-      await this.rateLimiter.throttle();
-
-      // Crypto app IDs
-      const apps = {
-        coinbase: { ios: '886427730', android: 'com.coinbase.android' },
-        binance: { ios: '1436799971', android: 'com.binance.dev' },
-        metamask: { ios: '1438144202', android: 'io.metamask' }
-      };
-
-      const rankings = {};
-
-      // Fetch iOS rankings
-      for (const [appName, ids] of Object.entries(apps)) {
-        try {
-          const iosApp = await appStore.app({ id: ids.ios });
-          rankings[appName] = {
-            ios: {
-              rank: iosApp.position || null, // Position in charts if available
-              rating: iosApp.score || null,
-              reviews: iosApp.reviews || null
-            }
-          };
-        } catch (err) {
-          rankings[appName] = { ios: { rank: null, rating: null, reviews: null } };
-        }
-
-        try {
-          await this.rateLimiter.throttle();
-          const androidApp = await gplay.app({ appId: ids.android });
-          rankings[appName].android = {
-            rating: androidApp.score || null,
-            reviews: androidApp.reviews || null,
-            installs: androidApp.installs || null
-          };
-        } catch (err) {
-          if (!rankings[appName]) rankings[appName] = {};
-          rankings[appName].android = { rating: null, reviews: null, installs: null };
-        }
-      }
-
-      results.appRankings = rankings;
-
-      // Check if we got any data
-      const hasData = Object.values(rankings).some(app =>
-        app.ios?.rating || app.android?.rating
-      );
-
-      if (hasData) {
-        results.dataStatus.appRankings = 'live';
-        console.log('✅ App rankings fetched:', Object.keys(rankings).map(app =>
-          `${app}: iOS=${rankings[app].ios?.rating?.toFixed(1) || 'N/A'}, Android=${rankings[app].android?.rating?.toFixed(1) || 'N/A'}`
-        ).join(', '));
-      }
-    } catch (error) {
-      console.log('⚠️ App rankings fetch failed:', error.message);
-    }
-
     // Deduplicate trending topics
     const seen = new Set();
     results.trendingTopics = results.trendingTopics.filter(t => {
@@ -1491,7 +1427,6 @@ class LighterStandaloneService {
         polymarket: data.polymarket,
         whaleActivity: data.whaleActivity,
         googleTrends: data.googleTrends,
-        appRankings: data.appRankings,
         dataStatus: {
           fearGreed: agentContext.fearGreed ? 'live' : 'unavailable',
           ...data.dataStatus
