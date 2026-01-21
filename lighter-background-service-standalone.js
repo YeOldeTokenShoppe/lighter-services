@@ -1846,34 +1846,35 @@ class LighterStandaloneService {
       console.log('⚠️ FRED_API_KEY not configured - skipping VIX');
     }
 
-    // Fetch DXY via UUP ETF from Alpha Vantage (UUP tracks ICE DXY index)
-    if (alphaKey) {
+    // Fetch DXY directly from Twelve Data
+    const twelveDataKey = process.env.TWELVEDATA_API_KEY;
+    if (twelveDataKey) {
       try {
         const dxyResponse = await axios.get(
-          `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=UUP&apikey=${alphaKey}`,
+          `https://api.twelvedata.com/quote?symbol=DXY&apikey=${twelveDataKey}`,
           { timeout: 10000 }
         );
-        const quote = dxyResponse.data?.['Global Quote'];
-        if (quote && quote['05. price']) {
-          const etfPrice = parseFloat(quote['05. price']);
-          // UUP ETF price ~27-28 correlates to DXY ~98-105
-          // Approximate conversion: DXY ≈ etfPrice * 3.62
-          const dxyApprox = etfPrice * 3.62;
-          const change = parseFloat(quote['09. change'] || 0) * 3.62;
-          const changePercent = parseFloat((quote['10. change percent'] || '0').replace('%', ''));
+        const data = dxyResponse.data;
+        if (data && data.close && !data.code) {
+          const current = parseFloat(data.close);
+          const previousClose = parseFloat(data.previous_close || current);
+          const change = current - previousClose;
+          const changePercent = previousClose ? (change / previousClose) * 100 : 0;
           results.dxy = {
-            value: parseFloat(dxyApprox.toFixed(2)),
+            value: parseFloat(current.toFixed(2)),
             change: parseFloat(change.toFixed(2)),
             changePercent: parseFloat(changePercent.toFixed(2)),
-            source: 'UUP ETF'
+            source: 'Twelve Data'
           };
-          console.log(`✅ Alpha Vantage DXY (via UUP): ${results.dxy.value}`);
+          console.log(`✅ Twelve Data DXY: ${results.dxy.value}`);
+        } else if (data.code) {
+          console.log(`⚠️ Twelve Data DXY error: ${data.message}`);
         }
       } catch (err) {
-        console.log('⚠️ Alpha Vantage DXY fetch error:', err.message);
+        console.log('⚠️ Twelve Data DXY fetch error:', err.message);
       }
     } else {
-      console.log('⚠️ ALPHAVANTAGE_API_KEY not configured - skipping DXY');
+      console.log('⚠️ TWELVEDATA_API_KEY not configured - skipping DXY');
     }
 
     // Fetch SPY from Alpha Vantage
