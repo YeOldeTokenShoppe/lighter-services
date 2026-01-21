@@ -1768,7 +1768,7 @@ class LighterStandaloneService {
   // ============================================================================
 
   startMacroDataUpdates() {
-    // Update macro data every 5 minutes (Yahoo Finance is free, Lighter has rate limits)
+    // Update macro data hourly (FRED for VIX/Treasury, Twelve Data for DXY, Alpha Vantage for SPY)
     const updateMacroData = async () => {
       if (!this.isRunning) return;
 
@@ -1846,28 +1846,40 @@ class LighterStandaloneService {
       console.log('⚠️ FRED_API_KEY not configured - skipping VIX');
     }
 
-    // Fetch DXY from Yahoo Finance (direct value)
-    try {
-      const yahooResponse = await axios.get(
-        `https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=2d`,
-        { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } }
-      );
-      const chart = yahooResponse.data?.chart?.result?.[0];
-      if (chart && chart.meta?.regularMarketPrice) {
-        const current = chart.meta.regularMarketPrice;
-        const previousClose = chart.meta.previousClose || current;
-        const change = current - previousClose;
-        const changePercent = previousClose ? (change / previousClose) * 100 : 0;
-        results.dxy = {
-          value: parseFloat(current.toFixed(2)),
-          change: parseFloat(change.toFixed(2)),
-          changePercent: parseFloat(changePercent.toFixed(2)),
-          source: 'Yahoo Finance'
-        };
-        console.log(`✅ Yahoo Finance DXY: ${results.dxy.value}`);
+    // Fetch DXY calculated from EUR/USD via Twelve Data
+    // EUR is 57.6% of DXY weight, so EUR/USD is a strong proxy
+    const twelveDataKey = process.env.TWELVEDATA_API_KEY;
+    if (twelveDataKey) {
+      try {
+        const forexResponse = await axios.get(
+          `https://api.twelvedata.com/quote?symbol=EUR/USD&apikey=${twelveDataKey}`,
+          { timeout: 10000 }
+        );
+        const data = forexResponse.data;
+        if (data && data.close && !data.code) {
+          const eurusd = parseFloat(data.close);
+          const eurusdPrev = parseFloat(data.previous_close || eurusd);
+          // Calibrated: EUR/USD 1.17 = DXY 98.56
+          // Formula: DXY ≈ -41.85 * EUR/USD + 147.52
+          const dxyValue = (-41.85 * eurusd) + 147.52;
+          const dxyPrev = (-41.85 * eurusdPrev) + 147.52;
+          const change = dxyValue - dxyPrev;
+          const changePercent = dxyPrev ? (change / dxyPrev) * 100 : 0;
+          results.dxy = {
+            value: parseFloat(dxyValue.toFixed(2)),
+            change: parseFloat(change.toFixed(2)),
+            changePercent: parseFloat(changePercent.toFixed(2)),
+            source: 'Twelve Data'
+          };
+          console.log(`✅ DXY (from EUR/USD ${eurusd}): ${results.dxy.value}`);
+        } else if (data.code) {
+          console.log(`⚠️ Twelve Data error: ${data.message}`);
+        }
+      } catch (err) {
+        console.log('⚠️ Twelve Data DXY fetch failed:', err.message);
       }
-    } catch (err) {
-      console.log('⚠️ Yahoo Finance DXY fetch failed:', err.message);
+    } else {
+      console.log('⚠️ TWELVEDATA_API_KEY not configured - skipping DXY');
     }
 
     // Fetch SPY from Alpha Vantage
