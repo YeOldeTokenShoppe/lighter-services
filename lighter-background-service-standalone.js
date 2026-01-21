@@ -1846,35 +1846,28 @@ class LighterStandaloneService {
       console.log('⚠️ FRED_API_KEY not configured - skipping VIX');
     }
 
-    // Fetch DXY directly from Twelve Data
-    const twelveDataKey = process.env.TWELVEDATA_API_KEY;
-    if (twelveDataKey) {
-      try {
-        const dxyResponse = await axios.get(
-          `https://api.twelvedata.com/quote?symbol=DXY&apikey=${twelveDataKey}`,
-          { timeout: 10000 }
-        );
-        const data = dxyResponse.data;
-        if (data && data.close && !data.code) {
-          const current = parseFloat(data.close);
-          const previousClose = parseFloat(data.previous_close || current);
-          const change = current - previousClose;
-          const changePercent = previousClose ? (change / previousClose) * 100 : 0;
-          results.dxy = {
-            value: parseFloat(current.toFixed(2)),
-            change: parseFloat(change.toFixed(2)),
-            changePercent: parseFloat(changePercent.toFixed(2)),
-            source: 'Twelve Data'
-          };
-          console.log(`✅ Twelve Data DXY: ${results.dxy.value}`);
-        } else if (data.code) {
-          console.log(`⚠️ Twelve Data DXY error: ${data.message}`);
-        }
-      } catch (err) {
-        console.log('⚠️ Twelve Data DXY fetch error:', err.message);
+    // Fetch DXY from Yahoo Finance (direct value)
+    try {
+      const yahooResponse = await axios.get(
+        `https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=2d`,
+        { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      const chart = yahooResponse.data?.chart?.result?.[0];
+      if (chart && chart.meta?.regularMarketPrice) {
+        const current = chart.meta.regularMarketPrice;
+        const previousClose = chart.meta.previousClose || current;
+        const change = current - previousClose;
+        const changePercent = previousClose ? (change / previousClose) * 100 : 0;
+        results.dxy = {
+          value: parseFloat(current.toFixed(2)),
+          change: parseFloat(change.toFixed(2)),
+          changePercent: parseFloat(changePercent.toFixed(2)),
+          source: 'Yahoo Finance'
+        };
+        console.log(`✅ Yahoo Finance DXY: ${results.dxy.value}`);
       }
-    } else {
-      console.log('⚠️ TWELVEDATA_API_KEY not configured - skipping DXY');
+    } catch (err) {
+      console.log('⚠️ Yahoo Finance DXY fetch failed:', err.message);
     }
 
     // Fetch SPY from Alpha Vantage
