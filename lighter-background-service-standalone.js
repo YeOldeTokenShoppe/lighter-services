@@ -289,7 +289,7 @@ class LighterStandaloneService {
       maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '10'),
       maxDailyLossUSD: parseFloat(process.env.MAX_DAILY_LOSS_USD || '50'),  // Stop trading if down $50
       minConfidence: parseFloat(process.env.MIN_TRADE_CONFIDENCE || '0.6'),  // Minimum 60% confidence
-      allowedSymbols: ['ETH', 'BTC'],  // Only trade these
+      allowedSymbols: ['BTC', 'ETH', 'SOL', 'XRP'],  // All tradeable assets
       cooldownMs: parseInt(process.env.TRADE_COOLDOWN_MS || '300000'),  // 5 min between trades
     };
 
