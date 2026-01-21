@@ -992,24 +992,36 @@ class LighterStandaloneService {
     try {
       // Convert sparkline to OHLC-like format for TeknoScreen compatibility
       const technicalData = {};
+      const now = Date.now();
 
       for (const [symbol, data] of Object.entries(coins)) {
         if (data.sparkline && data.sparkline.length > 0) {
           // Sparkline is hourly prices for 7 days (~168 points)
-          // Convert to simple candle format for charts
+          // Convert to candle format with proper timestamps for charts
           const candles = [];
           const prices = data.sparkline;
           const interval = Math.floor(prices.length / 42); // ~42 candles like OHLC
+          const hoursPerCandle = interval; // Each candle represents this many hours
 
+          // Calculate start time (7 days ago)
+          const startTime = now - (7 * 24 * 60 * 60 * 1000);
+
+          let candleIndex = 0;
           for (let i = 0; i < prices.length; i += interval) {
             const slice = prices.slice(i, i + interval);
             if (slice.length > 0) {
+              // Calculate timestamp for this candle (Unix timestamp in seconds)
+              const candleTime = Math.floor((startTime + (candleIndex * hoursPerCandle * 60 * 60 * 1000)) / 1000);
+
               candles.push({
+                time: candleTime,
                 open: slice[0],
                 high: Math.max(...slice),
                 low: Math.min(...slice),
-                close: slice[slice.length - 1]
+                close: slice[slice.length - 1],
+                volume: Math.random() * 1000000 // Placeholder volume since sparkline doesn't include it
               });
+              candleIndex++;
             }
           }
 
