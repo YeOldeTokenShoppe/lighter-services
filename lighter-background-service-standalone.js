@@ -1922,9 +1922,9 @@ class LighterStandaloneService {
         if (quote && quote['05. price']) {
           const etfPrice = parseFloat(quote['05. price']);
           // UUP ETF price ~27-28 correlates to DXY ~98-105
-          // Approximate conversion: DXY ≈ etfPrice * 3.55
-          const dxyApprox = etfPrice * 3.55;
-          const change = parseFloat(quote['09. change'] || 0) * 3.55;
+          // Approximate conversion: DXY ≈ etfPrice * 3.62
+          const dxyApprox = etfPrice * 3.62;
+          const change = parseFloat(quote['09. change'] || 0) * 3.62;
           const changePercent = parseFloat((quote['10. change percent'] || '0').replace('%', ''));
           results.dxy = {
             value: parseFloat(dxyApprox.toFixed(2)),
