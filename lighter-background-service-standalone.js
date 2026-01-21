@@ -1907,29 +1907,38 @@ class LighterStandaloneService {
         console.log('⚠️ FRED VIX fetch error:', err.message);
       }
 
-      // Fetch DXY from FRED (DTWEXBGS - Trade Weighted Dollar Index)
+    } else {
+      console.log('⚠️ FRED_API_KEY not configured - skipping VIX');
+    }
+
+    // Fetch DXY via UUP ETF from Alpha Vantage (UUP tracks ICE DXY index)
+    if (alphaKey) {
       try {
         const dxyResponse = await axios.get(
-          `https://api.stlouisfed.org/fred/series/observations?series_id=DTWEXBGS&api_key=${fredKey}&file_type=json&limit=2&sort_order=desc`,
+          `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=UUP&apikey=${alphaKey}`,
           { timeout: 10000 }
         );
-        const observations = dxyResponse.data?.observations;
-        if (observations && observations.length >= 1) {
-          const current = parseFloat(observations[0].value);
-          const previous = observations.length > 1 ? parseFloat(observations[1].value) : current;
-          const change = current - previous;
+        const quote = dxyResponse.data?.['Global Quote'];
+        if (quote && quote['05. price']) {
+          const etfPrice = parseFloat(quote['05. price']);
+          // UUP ETF price ~27-28 correlates to DXY ~98-105
+          // Approximate conversion: DXY ≈ etfPrice * 3.55
+          const dxyApprox = etfPrice * 3.55;
+          const change = parseFloat(quote['09. change'] || 0) * 3.55;
+          const changePercent = parseFloat((quote['10. change percent'] || '0').replace('%', ''));
           results.dxy = {
-            value: parseFloat(current.toFixed(2)),
+            value: parseFloat(dxyApprox.toFixed(2)),
             change: parseFloat(change.toFixed(2)),
-            changePercent: previous ? parseFloat(((change / previous) * 100).toFixed(2)) : 0
+            changePercent: parseFloat(changePercent.toFixed(2)),
+            source: 'UUP ETF'
           };
-          console.log(`✅ FRED DXY: ${results.dxy.value}`);
+          console.log(`✅ Alpha Vantage DXY (via UUP): ${results.dxy.value}`);
         }
       } catch (err) {
-        console.log('⚠️ FRED DXY fetch error:', err.message);
+        console.log('⚠️ Alpha Vantage DXY fetch error:', err.message);
       }
     } else {
-      console.log('⚠️ FRED_API_KEY not configured - skipping VIX/DXY');
+      console.log('⚠️ ALPHAVANTAGE_API_KEY not configured - skipping DXY');
     }
 
     // Fetch SPY from Alpha Vantage
