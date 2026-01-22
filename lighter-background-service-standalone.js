@@ -1403,9 +1403,22 @@ class LighterStandaloneService {
         ];
         const allKeywords = [...cryptoKeywords, ...financeKeywords];
 
+        // Current date for filtering out expired markets
+        const now = new Date();
+
         const relevantMarkets = response.data.filter(m => {
           const q = (m.question || '').toLowerCase();
-          return allKeywords.some(keyword => q.includes(keyword));
+          const hasRelevantKeyword = allKeywords.some(keyword => q.includes(keyword));
+
+          // Filter out markets with past end dates
+          if (m.endDate) {
+            const endDate = new Date(m.endDate);
+            if (endDate < now) {
+              return false; // Skip expired markets
+            }
+          }
+
+          return hasRelevantKeyword;
         });
 
         // Only show crypto/finance markets - no fallback to unrelated markets
