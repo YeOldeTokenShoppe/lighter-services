@@ -1158,24 +1158,68 @@ class LighterStandaloneService {
       if (!this.isRunning) return;
 
       try {
-        // Fetch Fear & Greed Index
-        const fearGreedResponse = await axios.get('https://api.alternative.me/fng/', {
-          timeout: 10000
-        });
+        let fearGreedValue = null;
+        let apiUpdateTime = null;
+        let valueClassification = null;
+        let dataSource = 'unknown';
 
-        const fgData = fearGreedResponse.data?.data?.[0];
-        const fearGreedValue = fgData?.value || 50;
+        // Try CoinMarketCap first (more real-time updates)
+        const cmcApiKey = process.env.COINMARKETCAP_API_KEY || process.env.NEXT_PUBLIC_COINMARKETCAP;
+        if (cmcApiKey) {
+          try {
+            const cmcResponse = await axios.get('https://pro-api.coinmarketcap.com/v3/fear-and-greed/latest', {
+              headers: {
+                'X-CMC_PRO_API_KEY': cmcApiKey,
+                'Accept': 'application/json'
+              },
+              timeout: 10000
+            });
 
-        // Capture API's native timestamp (when F&G was last calculated by Alternative.me)
-        // Alternative.me only updates 1-2 times per day, so this timestamp shows data freshness
-        const apiTimestamp = fgData?.timestamp ? parseInt(fgData.timestamp) * 1000 : null;
-        const apiUpdateTime = apiTimestamp ? new Date(apiTimestamp).toISOString() : null;
-        const valueClassification = fgData?.value_classification || null;
+            if (cmcResponse.data?.data?.value !== undefined) {
+              fearGreedValue = Math.round(cmcResponse.data.data.value);
+              apiUpdateTime = cmcResponse.data.data.update_time || cmcResponse.data.data.timestamp || new Date().toISOString();
+              valueClassification = cmcResponse.data.data.value_classification || this.getFearGreedLabel(fearGreedValue);
+              dataSource = 'coinmarketcap';
+              console.log(`📊 CoinMarketCap F&G: ${fearGreedValue} (${valueClassification})`);
+            }
+          } catch (cmcError) {
+            console.log(`⚠️ CoinMarketCap F&G failed: ${cmcError.message}, trying Alternative.me...`);
+          }
+        }
+
+        // Fallback to Alternative.me if CMC didn't work
+        if (fearGreedValue === null) {
+          try {
+            const altResponse = await axios.get('https://api.alternative.me/fng/', {
+              timeout: 10000
+            });
+
+            const fgData = altResponse.data?.data?.[0];
+            if (fgData?.value) {
+              fearGreedValue = parseInt(fgData.value);
+              const apiTimestamp = fgData.timestamp ? parseInt(fgData.timestamp) * 1000 : null;
+              apiUpdateTime = apiTimestamp ? new Date(apiTimestamp).toISOString() : null;
+              valueClassification = fgData.value_classification || null;
+              dataSource = 'alternative.me';
+              console.log(`📊 Alternative.me F&G: ${fearGreedValue} (${valueClassification})`);
+            }
+          } catch (altError) {
+            console.log(`⚠️ Alternative.me F&G also failed: ${altError.message}`);
+          }
+        }
+
+        // Final fallback
+        if (fearGreedValue === null) {
+          console.log('⚠️ All F&G sources failed, using fallback value 50');
+          fearGreedValue = 50;
+          dataSource = 'fallback';
+        }
 
         const agentContext = {
-          fearGreed: parseInt(fearGreedValue),
-          fearGreedApiTimestamp: apiUpdateTime, // When Alternative.me last updated this value
-          fearGreedClassification: valueClassification, // API's own classification
+          fearGreed: fearGreedValue,
+          fearGreedApiTimestamp: apiUpdateTime,
+          fearGreedClassification: valueClassification,
+          fearGreedSource: dataSource, // Track which API provided the data
           marketSentiment: fearGreedValue > 75 ? 'extreme_greed' :
                           fearGreedValue > 55 ? 'greed' :
                           fearGreedValue > 45 ? 'neutral' :
@@ -1186,7 +1230,7 @@ class LighterStandaloneService {
         };
 
         await this.db.collection('agentContext').doc('market').set(agentContext, { merge: true });
-        console.log(`🤖 Agent context updated: F&G=${fearGreedValue}, Sentiment=${agentContext.marketSentiment}, API Update=${apiUpdateTime || 'unknown'}`);
+        console.log(`🤖 Agent context updated: F&G=${fearGreedValue} (${dataSource}), Sentiment=${agentContext.marketSentiment}`);
 
       } catch (error) {
         console.error('❌ Error updating agent context:', error.message);
@@ -2134,14 +2178,22 @@ class LighterStandaloneService {
     // Run immediately on start
     updateNewsData();
 
-    // Then every 30 minutes (news doesn't need to be real-time)
-    setInterval(updateNewsData, 1800000);
+    // Then every 6 hours (4 calls/day = ~120/month to conserve API quota)
+    // News doesn't need to be real-time for sentiment analysis
+    setInterval(updateNewsData, 21600000); // 6 hours = 21,600,000ms
 
-    console.log('📰 Started news data updates (30min interval)');
+    console.log('📰 Started news data updates (6hr interval - API conservation mode)');
   }
 
   // Fetch news from CryptoPanic API v2 (Developer tier)
+  // Set CRYPTOPANIC_DISABLED=true to skip API calls entirely and use RSS only
   async fetchCryptoPanicNews() {
+    // Check if CryptoPanic is disabled (to conserve API quota)
+    if (process.env.CRYPTOPANIC_DISABLED === 'true') {
+      console.log('📰 CryptoPanic API disabled - using RSS feeds only (quota conservation)');
+      return { headlines: [], sentiment: null };
+    }
+
     const apiKey = process.env.CRYPTOPANIC_API_KEY;
 
     // If no API key, return empty (will fall back to RSS)
