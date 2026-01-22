@@ -1153,7 +1153,8 @@ class LighterStandaloneService {
   startAgentContextUpdates() {
     // Update agent context every 120 seconds (Fear & Greed, sentiment, trend)
     // Note: VIX, funding rate, and DXY are now fetched from real sources in startMacroDataUpdates
-    setInterval(async () => {
+
+    const updateAgentContext = async () => {
       if (!this.isRunning) return;
 
       try {
@@ -1162,10 +1163,19 @@ class LighterStandaloneService {
           timeout: 10000
         });
 
-        const fearGreedValue = fearGreedResponse.data?.data?.[0]?.value || 50;
+        const fgData = fearGreedResponse.data?.data?.[0];
+        const fearGreedValue = fgData?.value || 50;
+
+        // Capture API's native timestamp (when F&G was last calculated by Alternative.me)
+        // Alternative.me only updates 1-2 times per day, so this timestamp shows data freshness
+        const apiTimestamp = fgData?.timestamp ? parseInt(fgData.timestamp) * 1000 : null;
+        const apiUpdateTime = apiTimestamp ? new Date(apiTimestamp).toISOString() : null;
+        const valueClassification = fgData?.value_classification || null;
 
         const agentContext = {
           fearGreed: parseInt(fearGreedValue),
+          fearGreedApiTimestamp: apiUpdateTime, // When Alternative.me last updated this value
+          fearGreedClassification: valueClassification, // API's own classification
           marketSentiment: fearGreedValue > 75 ? 'extreme_greed' :
                           fearGreedValue > 55 ? 'greed' :
                           fearGreedValue > 45 ? 'neutral' :
@@ -1176,14 +1186,20 @@ class LighterStandaloneService {
         };
 
         await this.db.collection('agentContext').doc('market').set(agentContext, { merge: true });
-        console.log(`🤖 Agent context updated: F&G=${fearGreedValue}, Sentiment=${agentContext.marketSentiment}`);
+        console.log(`🤖 Agent context updated: F&G=${fearGreedValue}, Sentiment=${agentContext.marketSentiment}, API Update=${apiUpdateTime || 'unknown'}`);
 
       } catch (error) {
         console.error('❌ Error updating agent context:', error.message);
       }
-    }, 120000);
+    };
 
-    console.log('🤖 Started agent context updates (120s interval)');
+    // Run immediately on startup (don't wait 2 minutes for first update!)
+    updateAgentContext();
+
+    // Then continue every 120 seconds
+    setInterval(updateAgentContext, 120000);
+
+    console.log('🤖 Started agent context updates (immediate + 120s interval)');
   }
 
   startLighterDataUpdates() {
@@ -1328,29 +1344,44 @@ class LighterStandaloneService {
       );
 
       if (Array.isArray(response.data) && response.data.length > 0) {
-        // Filter for crypto-related markets
-        const cryptoMarkets = response.data.filter(m => {
+        // Filter for crypto and financial markets only
+        const cryptoKeywords = [
+          'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'sol',
+          'ripple', 'xrp', 'dogecoin', 'doge', 'altcoin', 'defi', 'nft',
+          'blockchain', 'coinbase', 'binance', 'stablecoin', 'usdt', 'usdc'
+        ];
+        const financeKeywords = [
+          'stock', 'market', 'fed', 'federal reserve', 'interest rate',
+          'inflation', 'recession', 's&p', 'nasdaq', 'dow', 'economy',
+          'gdp', 'treasury', 'dollar', 'forex', 'gold', 'oil', 'commodity',
+          'tariff', 'trade war', 'bull market', 'bear market', 'ipo',
+          'earnings', 'sec', 'etf', 'wall street'
+        ];
+        const allKeywords = [...cryptoKeywords, ...financeKeywords];
+
+        const relevantMarkets = response.data.filter(m => {
           const q = (m.question || '').toLowerCase();
-          return q.includes('bitcoin') || q.includes('btc') ||
-                 q.includes('ethereum') || q.includes('eth') ||
-                 q.includes('crypto');
+          return allKeywords.some(keyword => q.includes(keyword));
         });
 
-        const marketsToUse = cryptoMarkets.length > 0 ? cryptoMarkets : response.data;
-
-        results.polymarket = {
-          markets: marketsToUse.slice(0, 5).map(market => {
-            const prices = market.outcomePrices || [];
-            return {
-              title: market.question || 'Unknown',
-              yes: prices[0] ? Math.round(parseFloat(prices[0]) * 100) : 50,
-              no: prices[1] ? Math.round(parseFloat(prices[1]) * 100) : 50,
-              volume: this.formatVolume(market.volume || 0)
-            };
-          }),
-          source: 'polymarket_real'
-        };
-        console.log(`✅ Got ${results.polymarket.markets.length} Polymarket predictions`);
+        // Only show crypto/finance markets - no fallback to unrelated markets
+        if (relevantMarkets.length > 0) {
+          results.polymarket = {
+            markets: relevantMarkets.slice(0, 5).map(market => {
+              const prices = market.outcomePrices || [];
+              return {
+                title: market.question || 'Unknown',
+                yes: prices[0] ? Math.round(parseFloat(prices[0]) * 100) : 50,
+                no: prices[1] ? Math.round(parseFloat(prices[1]) * 100) : 50,
+                volume: this.formatVolume(market.volume || 0)
+              };
+            }),
+            source: 'polymarket_real'
+          };
+          console.log(`✅ Got ${results.polymarket.markets.length} crypto/finance Polymarket predictions`);
+        } else {
+          console.log('ℹ️ No crypto/finance Polymarket predictions found');
+        }
       }
     } catch (error) {
       console.log('⚠️ Polymarket fetch failed:', error.message);
