@@ -283,12 +283,20 @@ class LighterStandaloneService {
     // =========================================================================
     // TRADE EXECUTION CONFIGURATION
     // =========================================================================
+    // Debug: Log raw env var value
+    const rawTradingEnabled = process.env.TRADING_ENABLED;
+    console.log(`🔧 DEBUG: TRADING_ENABLED raw value: "${rawTradingEnabled}" (type: ${typeof rawTradingEnabled})`);
+
+    // More lenient check - accept 'true', 'TRUE', '1', 'yes'
+    const tradingEnabled = ['true', 'TRUE', '1', 'yes', 'YES'].includes(String(rawTradingEnabled).trim());
+    console.log(`🔧 DEBUG: Trading enabled resolved to: ${tradingEnabled}`);
+
     this.tradingConfig = {
-      enabled: process.env.TRADING_ENABLED === 'true',  // Must explicitly enable
+      enabled: tradingEnabled,  // Now more lenient
       maxPositionSizeUSD: parseFloat(process.env.MAX_POSITION_SIZE_USD || '100'),  // Max $100 per trade
       maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '10'),
       maxDailyLossUSD: parseFloat(process.env.MAX_DAILY_LOSS_USD || '50'),  // Stop trading if down $50
-      minConfidence: parseFloat(process.env.MIN_TRADE_CONFIDENCE || '0.6'),  // Minimum 60% confidence
+      minConfidence: parseFloat(process.env.MIN_TRADE_CONFIDENCE || '0.5'),  // Minimum 50% confidence
       allowedSymbols: ['BTC', 'ETH', 'SOL', 'XRP'],  // All tradeable assets
       cooldownMs: parseInt(process.env.TRADE_COOLDOWN_MS || '300000'),  // 5 min between trades
     };
@@ -2140,6 +2148,12 @@ class LighterStandaloneService {
   // ============================================================================
 
   startNewsDataUpdates() {
+    // Check if all news fetching is disabled
+    if (process.env.NEWS_DISABLED === 'true') {
+      console.log('📰 News fetching DISABLED (NEWS_DISABLED=true)');
+      return;
+    }
+
     const updateNewsData = async () => {
       if (!this.isRunning) return;
 
