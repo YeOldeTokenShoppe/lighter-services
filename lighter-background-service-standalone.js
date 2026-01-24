@@ -593,7 +593,7 @@ class LighterStandaloneService {
       // Send order to Lighter
       await this.rateLimiter.throttle();
       const response = await axios.post(
-        `${this.lighterConfig.baseUrl}/api/v1/transaction/send_tx`,
+        `${this.lighterConfig.baseUrl}/api/v1/sendTx`,
         {
           ...orderPayload,
           signature

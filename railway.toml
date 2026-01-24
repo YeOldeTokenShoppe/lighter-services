@@ -1,17 +1,4 @@
-[build]
-builder = "nixpacks"
-buildCommand = "npm install"
-
 [deploy]
 startCommand = "npm start"
-restartPolicyType = "always"
-
-[env]
-NODE_ENV = "production"
-# All sensitive environment variables should be set directly in Railway dashboard:
-# - LIGHTER_API_KEY
-# - LIGHTER_WALLET_PRIVATE_KEY  
-# - FIREBASE_SERVICE_ACCOUNT_KEY
-LIGHTER_ACCOUNT_INDEX = "0"
-LIGHTER_API_KEY_INDEX = "2"
-NEXT_PUBLIC_LIGHTER_BASE_URL = "https://testnet.zklighter.elliot.ai"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
