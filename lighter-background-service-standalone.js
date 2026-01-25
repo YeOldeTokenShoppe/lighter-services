@@ -613,8 +613,8 @@ class LighterStandaloneService {
       const client = new SignerClient(
         this.lighterConfig.baseUrl,
         apiKeyPrivateKey,
-        parseInt(this.lighterConfig.apiKeyIndex) || 0,
-        parseInt(this.lighterConfig.accountIndex) || 0
+        apiKeyIdx,
+        accountIdx
       );
 
       // Order parameters for zklighter-sdk
@@ -627,8 +627,6 @@ class LighterStandaloneService {
       const reduceOnly = false;
 
       // Fetch the next nonce from Lighter API (required for valid signatures)
-      const apiKeyIdx = parseInt(this.lighterConfig.apiKeyIndex) || 0;
-      const accountIdx = parseInt(this.lighterConfig.accountIndex) || 0;
       let nonce;
       try {
         const nonceResponse = await axios.get(
@@ -650,7 +648,7 @@ class LighterStandaloneService {
         isAsk,
         reduceOnly,
         nonce,
-        apiKeyIndex: parseInt(this.lighterConfig.apiKeyIndex) || 0
+        apiKeyIndex: apiKeyIdx
       }));
 
       // Create market order using SDK
@@ -663,7 +661,7 @@ class LighterStandaloneService {
         isAsk,
         reduceOnly,
         nonce,
-        parseInt(this.lighterConfig.apiKeyIndex) || 0
+        apiKeyIdx
       );
 
       if (err) {
@@ -706,16 +704,36 @@ class LighterStandaloneService {
     return markets[symbol] ?? 0;  // Default to ETH perp
   }
 
-  // Get current market price
+  // Get current market price - tries Firebase cache first, then CoinGecko
   async getMarketPrice(symbol) {
+    // Try to get cached price from Firebase first (avoids rate limits)
+    try {
+      if (this.db) {
+        const marketDoc = await this.db.collection('marketData').doc('current').get();
+        if (marketDoc.exists) {
+          const data = marketDoc.data();
+          const symbolData = data[symbol] || data[symbol.toLowerCase()];
+          if (symbolData?.price && Date.now() - (data.timestamp || 0) < 300000) { // 5 min cache
+            console.log(`📊 Using cached price for ${symbol}: $${symbolData.price}`);
+            return { price: symbolData.price };
+          }
+        }
+      }
+    } catch (cacheError) {
+      console.log('⚠️ Cache lookup failed, trying CoinGecko:', cacheError.message);
+    }
+
+    // Fall back to CoinGecko with rate limiting
     try {
       const coinIds = {
         'BTC': 'bitcoin',
         'ETH': 'ethereum',
-        'SOL': 'solana'
+        'SOL': 'solana',
+        'XRP': 'ripple'
       };
 
       const coinId = coinIds[symbol] || 'ethereum';
+      await this.rateLimiter.throttle();
       const response = await axios.get(
         `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
         { timeout: 10000 }
@@ -727,6 +745,13 @@ class LighterStandaloneService {
       return null;
     } catch (error) {
       console.error('Error fetching market price:', error.message);
+
+      // Last resort: use hardcoded approximate prices for testnet
+      const fallbackPrices = { 'BTC': 100000, 'ETH': 3300, 'SOL': 250, 'XRP': 3 };
+      if (fallbackPrices[symbol]) {
+        console.log(`⚠️ Using fallback price for ${symbol}: $${fallbackPrices[symbol]}`);
+        return { price: fallbackPrices[symbol] };
+      }
       return null;
     }
   }
