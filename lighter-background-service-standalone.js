@@ -600,11 +600,11 @@ class LighterStandaloneService {
         apiKeyPrivateKey = apiKeyPrivateKey.slice(2);
       }
 
-      console.log(`🔑 API Key Private Key length: ${apiKeyPrivateKey.length} (expected: 40)`);
+      console.log(`🔑 API Key Private Key length: ${apiKeyPrivateKey.length} chars (SDK expects 80 chars = 40 bytes)`);
 
-      if (apiKeyPrivateKey.length !== 40) {
-        console.error(`❌ Invalid API Key Private Key length: ${apiKeyPrivateKey.length}, expected 40`);
-        return { success: false, error: `Invalid API Key Private Key length: ${apiKeyPrivateKey.length}, expected 40` };
+      if (apiKeyPrivateKey.length !== 80) {
+        console.error(`❌ Invalid API Key Private Key length: ${apiKeyPrivateKey.length} chars, expected 80 chars (40 bytes)`);
+        return { success: false, error: `Invalid API Key Private Key length: ${apiKeyPrivateKey.length}, expected 80 chars` };
       }
 
       const client = new SignerClient(
