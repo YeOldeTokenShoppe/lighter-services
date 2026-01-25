@@ -600,7 +600,10 @@ class LighterStandaloneService {
         apiKeyPrivateKey = apiKeyPrivateKey.slice(2);
       }
 
+      const accountIdx = parseInt(this.lighterConfig.accountIndex) || 0;
+      const apiKeyIdx = parseInt(this.lighterConfig.apiKeyIndex) || 0;
       console.log(`🔑 API Key Private Key length: ${apiKeyPrivateKey.length} chars (SDK expects 80 chars = 40 bytes)`);
+      console.log(`🔑 Account Index: ${accountIdx}, API Key Index: ${apiKeyIdx}`);
 
       if (apiKeyPrivateKey.length !== 80) {
         console.error(`❌ Invalid API Key Private Key length: ${apiKeyPrivateKey.length} chars, expected 80 chars (40 bytes)`);
@@ -622,8 +625,22 @@ class LighterStandaloneService {
       // avgExecutionPrice: price * 100 (SDK uses this scaling)
       const avgExecutionPrice = Math.floor(marketData.price * 100);
       const reduceOnly = false;
-      // Get current nonce (timestamp-based for simplicity)
-      const nonce = Math.floor(Date.now() / 1000);
+
+      // Fetch the next nonce from Lighter API (required for valid signatures)
+      const apiKeyIdx = parseInt(this.lighterConfig.apiKeyIndex) || 0;
+      const accountIdx = parseInt(this.lighterConfig.accountIndex) || 0;
+      let nonce;
+      try {
+        const nonceResponse = await axios.get(
+          `${this.lighterConfig.baseUrl}/api/v1/next_nonce?account_index=${accountIdx}&api_key_index=${apiKeyIdx}`,
+          { timeout: 10000 }
+        );
+        nonce = nonceResponse.data?.nonce || nonceResponse.data;
+        console.log(`🔢 Fetched nonce from API: ${nonce}`);
+      } catch (nonceError) {
+        console.warn('⚠️ Could not fetch nonce from API, using timestamp fallback:', nonceError.message);
+        nonce = Math.floor(Date.now() / 1000);
+      }
 
       console.log('📦 SDK order params:', JSON.stringify({
         marketIndex,
