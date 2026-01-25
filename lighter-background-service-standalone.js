@@ -767,7 +767,28 @@ class LighterStandaloneService {
       const expireAt = new Date();
       expireAt.setDate(expireAt.getDate() + 30);
 
+      // Determine if trade was successful
+      const wasExecuted = status === 'executed';
+
       const logEntry = {
+        // Fields expected by PerformanceDashboard
+        plannedTrade: {
+          asset: decision.symbol,
+          direction: decision.action, // BUY or SELL
+          confidence: decision.confidence
+        },
+        result: result ? {
+          orderId: result.orderId,
+          size: result.size,
+          price: result.price,
+          side: result.side,
+          success: wasExecuted,
+          pnl: 0  // Will be updated when position closes
+        } : {
+          success: false,
+          pnl: 0
+        },
+        // Additional metadata
         decision: {
           action: decision.action,
           symbol: decision.symbol,
@@ -776,24 +797,19 @@ class LighterStandaloneService {
         },
         status,  // received, rejected, simulated, executed, failed, error, emergency_stop
         reason,
-        result: result ? {
-          orderId: result.orderId,
-          size: result.size,
-          price: result.price,
-          side: result.side
-        } : null,
         tradingState: {
           dailyTradeCount: this.tradingState.dailyTradeCount,
           dailyPnL: this.tradingState.dailyPnL,
           tradingHalted: this.tradingState.tradingHalted
         },
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: Date.now(),  // Numeric timestamp for dashboard queries
         createdAt: new Date().toISOString(),
         expireAt: expireAt  // TTL field - document expires after 30 days
       };
 
-      await this.db.collection('tradeHistory').add(logEntry);
-      console.log(`📝 Trade logged: ${status}`);
+      // Write to 'trades' collection (what PerformanceDashboard reads)
+      await this.db.collection('trades').add(logEntry);
+      console.log(`📝 Trade logged to 'trades' collection: ${status}`);
     } catch (error) {
       console.error('Error logging trade:', error.message);
     }
