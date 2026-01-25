@@ -551,6 +551,12 @@ class LighterStandaloneService {
     const { action, symbol, confidence, position_size } = decision;
 
     try {
+      // Check if market is supported on Lighter testnet
+      if (!this.isMarketSupported(symbol)) {
+        console.error(`❌ Market ${symbol} not available on Lighter testnet. Only ETH and BTC are supported.`);
+        return { success: false, error: `${symbol} not available on Lighter testnet - only ETH and BTC supported` };
+      }
+
       // Get current market price
       const marketData = await this.getMarketPrice(symbol);
       if (!marketData) {
@@ -693,15 +699,20 @@ class LighterStandaloneService {
 
   // Get market index for Lighter API
   getMarketIndex(symbol) {
-    // Lighter perpetual market indices (from lighter-python SDK)
-    // ETH perp = 0, BTC perp = 1 (verify these with Lighter docs)
+    // Lighter testnet only has ETH and BTC perpetuals
+    // SOL and XRP are NOT available on testnet
     const markets = {
-      'ETH': 0,   // ETH perpetual
-      'BTC': 1,   // BTC perpetual
-      'SOL': 2,   // SOL perpetual (if available)
-      'XRP': 3    // XRP perpetual (if available)
+      'ETH': 0,   // ETH perpetual ✅ available
+      'BTC': 1    // BTC perpetual ✅ available
+      // SOL, XRP not available on Lighter testnet
     };
-    return markets[symbol] ?? 0;  // Default to ETH perp
+    return markets[symbol];  // Returns undefined if not supported
+  }
+
+  // Check if a market is supported on Lighter testnet
+  isMarketSupported(symbol) {
+    const supportedMarkets = ['ETH', 'BTC'];
+    return supportedMarkets.includes(symbol);
   }
 
   // Get current market price - tries Firebase cache first, then CoinGecko
