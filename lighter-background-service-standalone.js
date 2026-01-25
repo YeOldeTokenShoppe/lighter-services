@@ -536,9 +536,9 @@ class LighterStandaloneService {
       return { valid: false, reason: `Cooldown active: ${remainingCooldown}s remaining` };
     }
 
-    // Check Lighter configuration
-    if (!this.lighterConfig.apiKey || !this.lighterConfig.walletPrivateKey) {
-      return { valid: false, reason: 'Lighter API keys not configured' };
+    // Check Lighter configuration - need API Key Private Key for SDK
+    if (!this.lighterConfig.apiKeyPrivateKey) {
+      return { valid: false, reason: 'LIGHTER_API_KEY_PRIVATE_KEY not configured - needed for trade execution' };
     }
 
     return { valid: true };
@@ -582,10 +582,30 @@ class LighterStandaloneService {
         return { success: false, error: 'zklighter-sdk not available - cannot sign transactions' };
       }
 
-      // Initialize SignerClient
-      const apiKeyPrivateKey = this.lighterConfig.walletPrivateKey.startsWith('0x')
-        ? this.lighterConfig.walletPrivateKey
-        : `0x${this.lighterConfig.walletPrivateKey}`;
+      // SignerClient requires the API Key Private Key (40 hex chars), NOT wallet private key
+      // This is the private key from your Lighter API key, found in account settings
+      let apiKeyPrivateKey = this.lighterConfig.apiKeyPrivateKey;
+
+      if (!apiKeyPrivateKey) {
+        console.error('❌ LIGHTER_API_KEY_PRIVATE_KEY not configured');
+        console.error('   The zklighter-sdk requires your Lighter API Key Private Key (40 hex characters)');
+        console.error('   This is different from your wallet private key');
+        console.error('   Find it in your Lighter account settings under API Keys');
+        return { success: false, error: 'LIGHTER_API_KEY_PRIVATE_KEY not configured - needed for SDK signing' };
+      }
+
+      // Clean up the key format
+      apiKeyPrivateKey = apiKeyPrivateKey.trim();
+      if (apiKeyPrivateKey.startsWith('0x')) {
+        apiKeyPrivateKey = apiKeyPrivateKey.slice(2);
+      }
+
+      console.log(`🔑 API Key Private Key length: ${apiKeyPrivateKey.length} (expected: 40)`);
+
+      if (apiKeyPrivateKey.length !== 40) {
+        console.error(`❌ Invalid API Key Private Key length: ${apiKeyPrivateKey.length}, expected 40`);
+        return { success: false, error: `Invalid API Key Private Key length: ${apiKeyPrivateKey.length}, expected 40` };
+      }
 
       const client = new SignerClient(
         this.lighterConfig.baseUrl,
