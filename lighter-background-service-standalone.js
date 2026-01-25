@@ -630,14 +630,14 @@ class LighterStandaloneService {
       let nonce;
       try {
         const nonceResponse = await axios.get(
-          `${this.lighterConfig.baseUrl}/api/v1/next_nonce?account_index=${accountIdx}&api_key_index=${apiKeyIdx}`,
+          `${this.lighterConfig.baseUrl}/api/v1/nextNonce?account_index=${accountIdx}&api_key_index=${apiKeyIdx}`,
           { timeout: 10000 }
         );
-        nonce = nonceResponse.data?.nonce || nonceResponse.data;
-        console.log(`🔢 Fetched nonce from API: ${nonce}`);
+        nonce = nonceResponse.data?.nonce ?? nonceResponse.data?.next_nonce ?? nonceResponse.data;
+        console.log(`🔢 Fetched nonce from API: ${nonce} (response: ${JSON.stringify(nonceResponse.data)})`);
       } catch (nonceError) {
-        console.warn('⚠️ Could not fetch nonce from API, using timestamp fallback:', nonceError.message);
-        nonce = Math.floor(Date.now() / 1000);
+        console.error('❌ Could not fetch nonce from API:', nonceError.message);
+        return { success: false, error: 'Failed to fetch nonce from Lighter API - cannot execute trade' };
       }
 
       console.log('📦 SDK order params:', JSON.stringify({
